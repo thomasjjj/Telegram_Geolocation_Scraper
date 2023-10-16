@@ -1,5 +1,9 @@
 # Telegram Coordinates Extractor
 
+### Example
+Using Exports from the Telegram Channels "WarArchive_ua" and "military_u_geo", this map was produced. This tool is agnostic to context, source accuracy, and bias. All results should be provisional and only used as a starting point.
+![image](https://github.com/thomasjjj/Telegram_Geolocation_Scraper/assets/118008765/ce32041a-fb98-4173-acaa-9b49f05f962f)
+
 ## Table of Contents
 - [Overview](#overview)
 - [Requirements](#requirements)
@@ -22,11 +26,6 @@ This Python script automates the extraction of geographic coordinates from a Tel
 2. Install pandas by running `pip install pandas` in your command line or terminal.
 
 ## Usage
-
-### Example
-Using Exports from the Telegram Channels "WarArchive_ua" and "military_u_geo", this map was produced. This tool is agnostic to context, source accuracy, and bias. All results should be provisional and only used as a starting point.
-![image](https://github.com/thomasjjj/Telegram_Geolocation_Scraper/assets/118008765/ce32041a-fb98-4173-acaa-9b49f05f962f)
-
 
 ### Exporting Chat from Telegram
 1. Open the Telegram desktop application.
