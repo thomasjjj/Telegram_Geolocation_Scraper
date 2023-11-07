@@ -1,4 +1,4 @@
-# Telegram Coordinates Extractor
+# Telegram_Geolocation_Scraper
 
 ### Example
 Using Exports from the Telegram Channels "WarArchive_ua" and "military_u_geo", this map was produced. This tool is agnostic to context, source accuracy, and bias. All results should be provisional and only used as a starting point.
