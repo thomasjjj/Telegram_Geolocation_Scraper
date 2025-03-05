@@ -3,25 +3,23 @@ import re
 import asyncio
 import os
 import logging
-from telethon import TelegramClient
 import sys
+import json
+import pandas as pd
+from telethon import TelegramClient
 
 # -----------------------------------------------------------------------------
 # Configure Logging
 # -----------------------------------------------------------------------------
-# Set up logging to file and console with an appropriate logging level.
-# Create a stream handler for stdout with UTF-8 encoding
 stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 stream_handler.setFormatter(formatter)
 
-# Create a file handler with UTF-8 encoding
 file_handler = logging.FileHandler("telegram_search.log", encoding="utf-8")
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(formatter)
 
-# Configure the root logger
 logging.basicConfig(
     level=logging.INFO,
     handlers=[stream_handler, file_handler]
@@ -30,7 +28,6 @@ logging.basicConfig(
 # -----------------------------------------------------------------------------
 # Obtain API Credentials
 # -----------------------------------------------------------------------------
-# Try to retrieve Telegram API credentials from environment variables.
 api_id_env = os.environ.get("TELEGRAM_API_ID")
 api_hash_env = os.environ.get("TELEGRAM_API_HASH")
 
@@ -43,7 +40,6 @@ if api_id_env and api_hash_env:
         logging.error("Invalid API ID found in environment variables. Please check your settings.")
         raise e
 else:
-    # If environment variables are missing or invalid, prompt the user for input.
     try:
         api_id = int(input("Enter your Telegram API ID: "))
         api_hash = input("Enter your Telegram API Hash: ")
@@ -61,9 +57,9 @@ client = TelegramClient('session_name', api_id, api_hash)
 total_coordinates_found = 0
 
 # -----------------------------------------------------------------------------
-# Regular Expression for Coordinate Patterns
+# Unified Regular Expression for Coordinate Patterns
 # -----------------------------------------------------------------------------
-# The regex pattern matches two formats:
+# This regex pattern matches:
 # 1. Decimal format (e.g., "49.12345, 38.67890")
 # 2. Degrees/Minutes/Seconds (DMS) format (e.g., "49° 2' 44.16\" N, 38° 19' 16.68\" E")
 coordinate_pattern = re.compile(
@@ -79,15 +75,6 @@ coordinate_pattern = re.compile(
 def dms_to_decimal(degrees, minutes, seconds, direction):
     """
     Convert coordinates from DMS (Degrees, Minutes, Seconds) format to decimal degrees.
-
-    Parameters:
-        degrees (str): Degrees part of the coordinate.
-        minutes (str): Minutes part of the coordinate.
-        seconds (str): Seconds part of the coordinate.
-        direction (str): Direction indicator ('N', 'S', 'E', or 'W').
-
-    Returns:
-        float or None: The coordinate in decimal degrees, or None if conversion fails.
     """
     try:
         degrees = float(degrees if degrees is not None else 0)
@@ -108,11 +95,6 @@ async def search_channel_for_coordinates(client, channel_entity, search_terms):
     """
     Search a specified Telegram channel or chat for coordinates using provided search terms,
     then write any found coordinates to a CSV file.
-
-    Parameters:
-        client (TelegramClient): The Telegram client instance.
-        channel_entity: The target channel, group, or chat entity.
-        search_terms (list): A list of search terms to filter messages.
     """
     csv_file_path = 'coordinates_search_results.csv'
     file_exists = os.path.isfile(csv_file_path)
@@ -121,24 +103,21 @@ async def search_channel_for_coordinates(client, channel_entity, search_terms):
     try:
         with open(csv_file_path, 'a', newline='', encoding='utf-8') as csvfile:
             csvwriter = csv.writer(csvfile)
-            # Write CSV header if file is being created for the first time.
             if not file_exists:
                 csvwriter.writerow(['Post ID', 'Channel ID', 'Channel/Group Username', 'Message Text', 'Date', 'URL', 'Latitude', 'Longitude'])
 
-            # Iterate over each search term.
             for search_term in search_terms:
                 logging.info("Searching for term '%s' in %s", search_term, channel_entity)
                 try:
                     async for message in client.iter_messages(channel_entity, search=search_term):
                         if message.text:
-                            # Use regex to search for coordinate patterns in the message text.
                             for coordinates_match in coordinate_pattern.finditer(message.text):
                                 if coordinates_match:
-                                    # Determine if the match is in decimal format.
+                                    # Check for decimal format first.
                                     if coordinates_match.group(1) and coordinates_match.group(2):
                                         latitude = coordinates_match.group(1)
                                         longitude = coordinates_match.group(2)
-                                    # Otherwise, check for DMS format.
+                                    # Otherwise, try for DMS format.
                                     elif coordinates_match.group(3) and coordinates_match.group(8):
                                         latitude = dms_to_decimal(
                                             coordinates_match.group(3),
@@ -153,9 +132,8 @@ async def search_channel_for_coordinates(client, channel_entity, search_terms):
                                             coordinates_match.group(11)
                                         )
                                     else:
-                                        continue  # Skip if no recognisable coordinate format is found.
+                                        continue
 
-                                    # Construct the URL to the message using the channel's username or fallback identifier.
                                     username = message.chat.username if message.chat.username else f"c/{message.chat.id}"
                                     url = f"https://t.me/{username}/{message.id}"
                                     row = [
@@ -177,51 +155,41 @@ async def search_channel_for_coordinates(client, channel_entity, search_terms):
         logging.error("Failed to write to CSV file: %s", e)
 
 # -----------------------------------------------------------------------------
-# Main Function: Run Coordinate Searches
+# Function: Search All Chats for Coordinates
 # -----------------------------------------------------------------------------
-async def main():
+async def search_all_chats_for_coordinates(client, search_terms):
     """
-    Main function to initiate the Telegram client and perform coordinate searches across channels/chats.
+    Search all available chats (channels, groups, private chats) for coordinates.
     """
     try:
-        # Start the Telegram client session.
+        dialogs = await client.get_dialogs()
+        for dialog in dialogs:
+            logging.info("Searching in: %s", dialog.name)
+            await search_channel_for_coordinates(client, dialog.entity, search_terms)
+    except Exception as e:
+        logging.error("Error retrieving dialogs: %s", e)
+
+# -----------------------------------------------------------------------------
+# Asynchronous Function: Telegram Search Main
+# -----------------------------------------------------------------------------
+async def telegram_search_main(option):
+    """
+    Execute the Telegram search options.
+    """
+    search_terms = [
+        '"E', '"N', '"S', '"W', 'Coordinates', 'Geolocation', 'Geolocated', 'located', 'location', 'gps',
+        'Геолокація', 'Геолокований', 'Розташований', 'Місцезнаходження',
+        'Геолокация', 'Геолокированный', 'Расположенный', 'Местоположение', 'Координати'
+    ]
+
+    try:
         await client.start()
         logging.info("Telegram client started successfully.")
     except Exception as e:
         logging.error("Failed to start the Telegram client: %s", e)
         return
 
-    async def search_all_chats_for_coordinates(client, search_terms):
-        """
-        Search all available chats (channels, groups, private chats) for coordinates.
-
-        Parameters:
-            client (TelegramClient): The Telegram client instance.
-            search_terms (list): A list of search terms to filter messages.
-        """
-        try:
-            dialogs = await client.get_dialogs()
-            for dialog in dialogs:
-                logging.info("Searching in: %s", dialog.name)
-                await search_channel_for_coordinates(client, dialog.entity, search_terms)
-        except Exception as e:
-            logging.error("Error retrieving dialogs: %s", e)
-
-    # Display search options to the user.
-    print("Please select a search option:")
-    print("1 - Search a specific channel by username or ID")
-    print("2 - Search all channels, groups, and chats")
-    option = input("Enter your choice (1 or 2): ")
-
-    # List of search terms for finding potential coordinate data.
-    search_terms = [
-        '"E', '"N', '"S', '"W', 'Coordinates', 'Geolocation', 'Geolocated', 'located', 'location', 'gps',
-        'Геолокація', 'Геолокований', 'Розташований', 'Місцезнаходження',  # Ukrainian terms.
-        'Геолокация', 'Геолокированный', 'Расположенный', 'Местоположение', 'Координати'  # Russian terms.
-    ]
-
     if option == '1':
-        # Allow the user to search a specific channel by username or ID.
         channel_identifier = input("Enter the username (e.g., @channelname) or ID of the channel to search: ")
         try:
             entity = await client.get_entity(channel_identifier)
@@ -230,24 +198,104 @@ async def main():
             logging.error("Could not find a channel or group with the identifier '%s'. Error: %s", channel_identifier, e)
             print(f"Error: Could not find a channel or group with the identifier '{channel_identifier}'.")
     elif option == '2':
-        # Search across all available chats.
         await search_all_chats_for_coordinates(client, search_terms)
     else:
-        logging.warning("Invalid input received: %s", option)
-        print("Invalid input. Please enter either 1 or 2.")
+        logging.warning("Invalid option provided to telegram_search_main.")
 
     try:
-        # Disconnect the Telegram client.
         await client.disconnect()
         logging.info("Telegram client disconnected successfully.")
     except Exception as e:
         logging.error("Error disconnecting the client: %s", e)
 
 # -----------------------------------------------------------------------------
-# Entry Point
+# Synchronous Function: JSON Export Processing
+# -----------------------------------------------------------------------------
+def process_json_export():
+    """
+    Process a JSON export file to extract coordinates using the unified regex pattern
+    and save the results to a CSV file.
+    """
+    def process_telegram_data(json_file_path, post_link_base):
+        messages_with_coordinates = []
+        # Open and load the JSON file.
+        with open(json_file_path, 'r', encoding='utf-8') as f:
+            telegram_data = json.load(f)
+        # Iterate through each message in the JSON export.
+        for message in telegram_data.get('messages', []):
+            text_field = str(message.get('text', ''))
+            for coordinates_match in coordinate_pattern.finditer(text_field):
+                if coordinates_match:
+                    if coordinates_match.group(1) and coordinates_match.group(2):
+                        latitude = coordinates_match.group(1)
+                        longitude = coordinates_match.group(2)
+                    elif coordinates_match.group(3) and coordinates_match.group(8):
+                        latitude = dms_to_decimal(
+                            coordinates_match.group(3),
+                            coordinates_match.group(4),
+                            coordinates_match.group(5),
+                            coordinates_match.group(6)
+                        )
+                        longitude = dms_to_decimal(
+                            coordinates_match.group(8),
+                            coordinates_match.group(9),
+                            coordinates_match.group(10),
+                            coordinates_match.group(11)
+                        )
+                    else:
+                        continue
+
+                    post_id = message.get('id', 'N/A')
+                    post_date = message.get('date', 'N/A')
+                    post_type = message.get('type', 'N/A')
+                    post_text = text_field
+                    media_type = message.get('media_type', 'N/A')
+                    message_info = {
+                        'Post ID': post_id,
+                        'Post Date': post_date,
+                        'Post Message': post_text,
+                        'Post Type': post_type,
+                        'Media Type': media_type,
+                        'Latitude': latitude,
+                        'Longitude': longitude
+                    }
+                    messages_with_coordinates.append(message_info)
+                    # Stop after first valid coordinate match in a message.
+                    break
+        df = pd.DataFrame(messages_with_coordinates)
+        df['Post Link'] = post_link_base + df['Post ID'].astype(str)
+        column_order = ['Post Link', 'Post ID', 'Post Date', 'Post Message', 'Post Type', 'Media Type', 'Latitude', 'Longitude']
+        df = df[column_order]
+        return df
+
+    while True:
+        csv_file_name = input("Please enter the name for the output CSV file (e.g., channel_name_coordinates): ")
+        json_file_path = input("Please enter the full path to the JSON file you want to process: ")
+        csv_save_path = input(f"Please enter the full path where you want to save the CSV file (e.g., C:/path/to/save/{csv_file_name}.csv): ")
+        post_link_base = input("Please enter the base URL for the post links (e.g., https://t.me/WarArchive_ua/): ")
+        df_messages_with_coordinates = process_telegram_data(json_file_path, post_link_base)
+        df_messages_with_coordinates.to_csv(csv_save_path, index=False, encoding='utf-8')
+        print(f"CSV file saved as {csv_save_path}")
+        another_file = input("Do you want to process another file? (yes/no): ").strip().lower()
+        if another_file != 'yes':
+            break
+
+# -----------------------------------------------------------------------------
+# Main Entry Point
 # -----------------------------------------------------------------------------
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logging.critical("An unhandled exception occurred: %s", e)
+    print("Please select a search option:")
+    print("1 - Search a specific channel by username or ID")
+    print("2 - Search all channels, groups, and chats")
+    print("3 - Process a JSON export file to retrieve coordinates")
+    option = input("Enter your choice (1, 2, or 3): ").strip()
+
+    if option in ['1', '2']:
+        try:
+            asyncio.run(telegram_search_main(option))
+        except Exception as e:
+            logging.critical("An unhandled exception occurred: %s", e)
+    elif option == '3':
+        process_json_export()
+    else:
+        print("Invalid input. Please run the script again and enter 1, 2, or 3.")
