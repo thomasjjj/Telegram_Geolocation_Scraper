@@ -1,143 +1,119 @@
-# Scrape Coordinates from Telegram Messages - Scrape_Coordinates.py
+# Scrape Coordinates from Telegram Messages
 
 ## Overview
-This Python script uses the Telethon library to search Telegram channels and chats for geographical coordinates in messages. It supports both decimal and DMS (Degrees, Minutes, Seconds) formats and logs results in a CSV file.
+This Python script integrates two previously separate tools into one unified program. It utilizes the [Telethon](https://github.com/LonamiWebs/Telethon) library to search Telegram channels, groups, and chats for geographical coordinates within messages. The script supports both decimal and DMS (Degrees, Minutes, Seconds) formats, and it also offers the option to process exported JSON chat histories. All extracted coordinates, along with accompanying message metadata, are saved into a CSV file.
 
 ## Features
-- Searches for coordinates in Telegram messages across specific or all chats.
-- Supports both decimal and DMS coordinate formats.
-- Saves extracted coordinates, along with message metadata, to a CSV file.
-- Handles authentication securely using environment variables or user input.
-- Implements robust logging and error handling.
-
+- **Multiple Search Options:**  
+  - **Option 1:** Search a specific Telegram channel or group by username or ID.
+  - **Option 2:** Search all accessible Telegram chats.
+  - **Option 3:** Process a JSON export file to extract coordinates.
+- **Unified Regex Extraction:**  
+  A single regular expression is used throughout the script to consistently detect coordinates in both decimal and DMS formats.
+- **Secure Authentication:**  
+  Retrieves Telegram API credentials either from environment variables or via user input.
+- **Robust Logging:**  
+  All operations are logged to both console and file (`telegram_search.log`) for detailed debugging and auditing.
+- **CSV Output:**  
+  Extracted data is saved to a CSV file including fields such as Post ID, Channel/Group ID, Username, Message Text, Date, URL, Latitude, and Longitude.
+- **JSON Export Support:**  
+  In addition to live Telegram searches, the script can process JSON exports from Telegram channels—ideal for analyzing historical data.
 
 ## Search Terms
-
-For speed, this script does not look through every message in the provided channels. Instead, it looks for key elements that normally coincide with coordinates. 
-
-The script searches for messages containing the following terms:
-
+For efficiency, the script filters messages using key terms that usually coincide with the presence of coordinates. The search terms include:
 ```
 "E", "N", "S", "W", "Coordinates", "Geolocation", "Geolocated", "located", "location", "gps",
 "Геолокація", "Геолокований", "Розташований", "Місцезнаходження",  # Ukrainian terms
 "Геолокация", "Геолокированный", "Расположенный", "Местоположение", "Координати"  # Russian terms
 ```
 
-Logging
-
-
 ## Requirements
-- Python 3.8+
-- Telethon library
-- A Telegram API ID and API Hash (obtained from [my.telegram.org](https://my.telegram.org/))
+- **Python:** Version 3.8 or higher.
+- **Libraries:**  
+  - [Telethon](https://github.com/LonamiWebs/Telethon)
+  - [pandas](https://pandas.pydata.org/) (for processing JSON exports)
+- **Telegram Credentials:** A Telegram API ID and API Hash, which can be obtained from [my.telegram.org](https://my.telegram.org/).
 
 ## Installation
 
-1. Clone this repository or download the script.
+1. **Clone or Download the Repository:**
    ```sh
    git clone https://github.com/yourrepo/scrape-coordinates.git
    cd scrape-coordinates
    ```
 
-2. Install the required dependencies:
+2. **Install the Required Dependencies:**
    ```sh
-   pip install telethon
+   pip install telethon pandas
    ```
 
-3. Set up your Telegram API credentials:
-   - **Option 1**: Store API credentials as environment variables:
+3. **Set Up Telegram API Credentials:**
+   - **Option 1:** Set your credentials as environment variables:
      ```sh
      export TELEGRAM_API_ID=your_api_id
      export TELEGRAM_API_HASH=your_api_hash
      ```
-     *(For Windows, use `set` instead of `export`.)*
-   - **Option 2**: Enter API credentials manually when prompted.
+     *(On Windows, use `set` instead of `export`.)*
+   - **Option 2:** Enter your credentials manually when prompted by the script.
 
 ## Usage
 
-Run the script:
+Run the script using Python:
 ```sh
-python Scrape_Coordinates.py
+python main_script.py
 ```
 
-You will be prompted to choose one of the following options:
-1. Search a specific Telegram channel or group by username or ID.
-2. Search all accessible Telegram chats.
+When you run the script, you will be prompted to choose one of three options:
 
-Results will be saved to `older_coordinates_search_results.csv`.
+1. **Search a Specific Channel or Group:**  
+   Enter the username (e.g., `@channelname`) or channel/group ID. The script will search messages in that chat for coordinate data.
 
-## Logging
-- Logs are stored in `telegram_search.log`.
-- Console and file logging are enabled for debugging and tracking issues.
+2. **Search All Telegram Chats:**  
+   The script will iterate through all accessible chats (channels, groups, private chats) and search for messages containing coordinates.
 
-## Error Handling
-- If authentication fails, the script prompts for manual input.
-- Errors in retrieving messages or searching channels are logged.
+3. **Process a JSON Export File:**  
+   This option is designed for processing a JSON file exported from a Telegram chat.  
+   **Steps for JSON Export:**
+   - **Exporting Chat from Telegram:**
+     1. Open the Telegram desktop application.
+     2. Navigate to the desired channel or group.
+     3. Click on the three vertical dots (⋮) at the top-right corner.
+     4. Select **Export chat history**.
+     5. In the export dialogue, choose **JSON** as the format and disable media downloads.
+     6. Export and save the JSON file.
+   - **Processing the JSON Export:**
+     The script will prompt you to:
+     - Enter the output CSV file name.
+     - Provide the full path to the JSON file.
+     - Specify the path where you wish to save the resulting CSV.
+     - Input the base URL for constructing post links.
+     
+   The extracted data will include details such as the Post ID, date, message content, media type, latitude, and longitude.
 
-## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+## Example Map
+Using exports from Telegram channels such as "WarArchive_ua" and "military_u_geo", you can generate a map of the extracted coordinates. This tool is agnostic to context, source accuracy, and bias; all results should be treated as provisional and used as a starting point.
 
-## Contribution
-Pull requests are welcome! If you find a bug or want to propose improvements, please open an issue.
-
-## Contact
-For any questions, contact [your email] or open an issue on the repository.
-
-
-
-# Telegram_Geolocation_Scraper - json_export_coordinates.py
-
-### Example
-Using Exports from the Telegram Channels "WarArchive_ua" and "military_u_geo", this map was produced. This tool is agnostic to context, source accuracy, and bias. All results should be provisional and only used as a starting point.
 ![image](https://github.com/thomasjjj/Telegram_Geolocation_Scraper/assets/118008765/ce32041a-fb98-4173-acaa-9b49f05f962f)
 
-## Table of Contents
-- [Overview](#overview)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Usage](#usage)
-  - [Exporting Chat from Telegram](#exporting-chat-from-telegram)
-  - [Running the Script](#running-the-script)
-- [Viewing Coordinates on Google Earth](#viewing-coordinates-on-google-earth)
-
-## Overview
-This Python script automates the extraction of geographic coordinates from a Telegram channel's exported chat history. The extracted data is saved as a CSV file, including additional details like the post's ID, date, message content, and media type.
-
-## Requirements
-- Python 3.x
-- Tkinter (usually comes pre-installed with Python)
-- pandas library
-
-## Installation
-1. Ensure that you have Python installed. If not, download and install it from [python.org](https://www.python.org/).
-2. Install pandas by running `pip install pandas` in your command line or terminal.
-
-## Usage
-
-### Exporting Chat from Telegram
-1. Open the Telegram desktop application.
-2. Navigate to the channel whose data you wish to export.
-3. Click on the three vertical dots (⋮) at the top-right corner to reveal a dropdown menu.
-4. Choose `Export chat history`.
-5. In the dialogue box that appears:
-    - Under 'Format', select `JSON`.
-    - Disable all media downloads by unchecking the boxes next to each media type.
-6. Click `Export` to save the JSON file on your computer.
-
-### Running the Script
-1. Save the Python script in a location of your choice.
-2. Open your command line or terminal and navigate to the directory where the script is saved.
-3. Run the script by typing `json_export_coordinates.py`.
-4. Follow the on-screen prompts to:
-    - Name the output CSV file.
-    - Select the JSON file to process.
-    - Specify the directory to save the CSV file.
-    - Enter the base URL for post links.
-
 ## Viewing Coordinates on Google Earth
-1. Open Google Earth on your computer.
-2. Navigate to `File` > `Import`.
-3. In the dialogue box, select the CSV file that you generated with this script.
-4. Google Earth will automatically read the latitude and longitude columns, plotting the coordinates on the map.
+1. Open **Google Earth** on your computer.
+2. Navigate to **File > Import**.
+3. Select the CSV file generated by the script.
+4. Google Earth will read the latitude and longitude columns automatically, plotting the coordinates on the map.
 
-By following these steps, you can visualise the geographic locations mentioned in the Telegram posts directly on Google Earth.
+## Logging
+- **Log File:** All logs are written to `telegram_search.log`.
+- **Console Output:** Logging is also output to the console for real-time feedback.
+- **Error Handling:**  
+  - Authentication failures prompt for manual input.
+  - Any errors during message retrieval or channel searches are logged for debugging.
+
+## License
+This project is licensed under the MIT License – see the [LICENSE](LICENSE) file for details.
+
+## Contribution
+Contributions are welcome! If you encounter any bugs or have suggestions for improvements, please open an issue or submit a pull request.
+
+## Contact
+For any queries, please contact [your email] or open an issue in the repository.
+
