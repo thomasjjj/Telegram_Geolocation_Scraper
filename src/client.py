@@ -1,7 +1,16 @@
 import logging
 import time
+import sys
 from telethon import TelegramClient
-from coordinates import extract_coordinates
+from src.coordinates import extract_coordinates
+
+try:
+    from colorama import init, Fore, Style, Cursor
+
+    colorama_available = True
+    init(autoreset=True)  # Initialize colorama
+except ImportError:
+    colorama_available = False
 
 
 class TelegramCoordinatesClient:
@@ -20,6 +29,13 @@ class TelegramCoordinatesClient:
         self.total_coordinates_found = 0
         self.total_messages_processed = 0
         self.start_time = None
+        self.last_status_update = 0
+        self.status_update_interval = 0.5  # Update status every 0.5 seconds
+        self.last_count = 0  # For calculating processing rate
+
+        # Last coordinate information
+        self.last_coordinate_line = None
+        self.display_initialized = False
 
     async def start(self):
         """Start the Telegram client."""
@@ -56,11 +72,87 @@ class TelegramCoordinatesClient:
             minutes = int((elapsed % 3600) // 60)
             return f"{hours}h {minutes}m"
 
+    def _get_processing_rate(self):
+        """Calculate the messages processing rate (messages per second)."""
+        elapsed = time.time() - self.start_time
+        if elapsed > 0:
+            return self.total_messages_processed / elapsed
+        return 0
+
+    def _update_progress_display(self, coordinates_found, force=False, latest_coordinate=None):
+        """Update the progress display with current stats."""
+        current_time = time.time()
+        # Only update at certain intervals to avoid excessive screen updates
+        if not force and (current_time - self.last_status_update < self.status_update_interval):
+            return
+
+        # Calculate processing rate since last update
+        time_since_last = current_time - self.last_status_update
+        msgs_since_last = self.total_messages_processed - self.last_count
+
+        # Calculate current rate
+        current_rate = msgs_since_last / time_since_last if time_since_last > 0 else 0
+
+        # Calculate overall rate
+        overall_rate = self._get_processing_rate()
+
+        # Update for next calculation
+        self.last_count = self.total_messages_processed
+        self.last_status_update = current_time
+
+        # Create progress status line
+        if colorama_available:
+            progress_status = (
+                f"{Fore.CYAN}Progress: {Fore.GREEN}{self._get_elapsed_time()} {Style.RESET_ALL}| "
+                f"{Fore.CYAN}Messages: {Fore.GREEN}{self.total_messages_processed} {Style.RESET_ALL}| "
+                f"{Fore.CYAN}Coordinates: {Fore.GREEN}{self.total_coordinates_found} {Style.RESET_ALL}| "
+                f"{Fore.CYAN}Rate: {Fore.GREEN}{current_rate:.1f} msg/s {Style.RESET_ALL}| "
+                f"{Fore.CYAN}Avg: {Fore.GREEN}{overall_rate:.1f} msg/s{Style.RESET_ALL}"
+            )
+        else:
+            progress_status = (
+                f"Progress: {self._get_elapsed_time()} | "
+                f"Messages: {self.total_messages_processed} | "
+                f"Coordinates: {self.total_coordinates_found} | "
+                f"Rate: {current_rate:.1f} msg/s | "
+                f"Avg: {overall_rate:.1f} msg/s"
+            )
+
+        # Update coordinate line if we have a new one
+        if latest_coordinate:
+            latitude, longitude, url = latest_coordinate
+            if colorama_available:
+                self.last_coordinate_line = (
+                    f"{Fore.YELLOW}📍 {latitude}, {longitude} {Fore.BLUE}• {url}{Style.RESET_ALL}"
+                )
+            else:
+                self.last_coordinate_line = f"📍 {latitude}, {longitude} • {url}"
+
+        # If we already initialized the display, move cursor up to rewrite the lines
+        if self.display_initialized and colorama_available:
+            # Move up 2 lines (progress + coordinate)
+            sys.stdout.write(Cursor.UP(2) + '\r')
+
+        # Print the status line
+        print(progress_status)
+
+        # Print the coordinate line if we have one
+        if self.last_coordinate_line:
+            print(self.last_coordinate_line)
+        else:
+            print("No coordinates found yet...")
+
+        # Mark display as initialized
+        self.display_initialized = True
+
     def _log_progress(self, message_count, coordinate_count, is_final=False):
         """Log progress information."""
         elapsed = self._get_elapsed_time()
 
         if is_final:
+            # Add newlines for clean separation before final message
+            if self.display_initialized:
+                print("\n")
             logging.info(
                 f"Search completed in {elapsed}: Processed {message_count} messages, "
                 f"found {coordinate_count} coordinates"
@@ -86,11 +178,21 @@ class TelegramCoordinatesClient:
         coordinates_found = 0
         messages_processed = 0
         self.start_time = time.time()
+        self.last_status_update = self.start_time
+        self.last_count = 0
+        self.last_coordinate_line = None
+        self.display_initialized = False
+
         channel_name = getattr(channel_entity, 'title', str(channel_entity.id)) if hasattr(channel_entity,
                                                                                            'id') else str(
             channel_entity)
 
         logging.info(f"Starting search in channel: {channel_name}")
+        print(f"Starting search in channel: {channel_name}")
+        print("Live progress will show below - press Ctrl+C to cancel\n")
+
+        # Display initial status
+        self._update_progress_display(coordinates_found, force=True)
 
         for search_term in search_terms:
             logging.info(f"Searching for term '{search_term}' in {channel_name}")
@@ -107,7 +209,8 @@ class TelegramCoordinatesClient:
                         coordinates = extract_coordinates(message.text)
                         if coordinates:
                             latitude, longitude = coordinates
-                            username = message.chat.username if message.chat.username else f"c/{message.chat.id}"
+                            username = message.chat.username if hasattr(message.chat,
+                                                                        'username') and message.chat.username else f"c/{message.chat.id}"
                             url = f"https://t.me/{username}/{message.id}"
 
                             row = [
@@ -124,10 +227,26 @@ class TelegramCoordinatesClient:
                             writer.writerow(row)
                             coordinates_found += 1
                             self.total_coordinates_found += 1
+
+                            # Pass the latest coordinate info to update display
+                            latest_coordinate = (latitude, longitude, url)
+
+                            # Update display with the latest coordinate
+                            self._update_progress_display(coordinates_found, force=False,
+                                                          latest_coordinate=latest_coordinate)
+
+                            # Log to file but don't output to console (our display handles it)
                             logging.info(
                                 f"[{self._get_elapsed_time()}] Coordinates found ({self.total_coordinates_found}): {latitude}, {longitude} - {url}")
+                    else:
+                        # Update display even if no coordinates found
+                        self._update_progress_display(coordinates_found)
+
             except Exception as e:
                 logging.error(f"An error occurred while searching for term '{search_term}' in {channel_name}: {e}")
+
+        # Final update with force=True to ensure it's displayed
+        self._update_progress_display(coordinates_found, force=True)
 
         self._log_progress(messages_processed, coordinates_found, is_final=True)
         logging.info(
@@ -149,12 +268,22 @@ class TelegramCoordinatesClient:
         total_chats = 0
         chats_processed = 0
         self.start_time = time.time()
+        self.last_status_update = self.start_time
+        self.last_count = 0
+        self.last_coordinate_line = None
+        self.display_initialized = False
 
         try:
             logging.info("Retrieving list of all accessible chats...")
+            print("Retrieving list of all accessible chats...")
             dialogs = await self.client.get_dialogs()
             total_chats = len(dialogs)
             logging.info(f"Found {total_chats} accessible chats to search")
+            print(f"Found {total_chats} accessible chats to search")
+            print("Live progress will show below - press Ctrl+C to cancel\n")
+
+            # Display initial status
+            self._update_progress_display(total_found, force=True)
 
             for dialog in dialogs:
                 chats_processed += 1
@@ -164,16 +293,29 @@ class TelegramCoordinatesClient:
                 logging.info(
                     f"Progress: {percentage:.1f}% - Searching chat {chats_processed}/{total_chats}: {chat_name}")
 
+                # Add a newline before processing a new chat for visibility in logs
+                if self.display_initialized:
+                    print("\n\n")
+                    self.display_initialized = False
+
+                print(f"Searching chat {chats_processed}/{total_chats}: {chat_name}")
+
                 found = await self.search_channel(dialog.entity, search_terms, writer)
                 total_found += found
 
                 logging.info(
                     f"Chat {chats_processed}/{total_chats} complete - Running total: {total_found} coordinates found")
+                print(f"Chat {chats_processed}/{total_chats} complete - Running total: {total_found} coordinates found")
 
         except Exception as e:
             logging.error(f"Error retrieving dialogs: {e}")
 
         elapsed = self._get_elapsed_time()
+        # Final summary for clarity
+        print(f"\nSearch completed in {elapsed}:")
+        print(f"Searched {chats_processed} chats, processed {self.total_messages_processed} messages")
+        print(f"Found {total_found} coordinates")
+
         logging.info(
             f"Search completed in {elapsed}: Searched {chats_processed} chats, processed {self.total_messages_processed} messages, found {total_found} coordinates")
         return total_found

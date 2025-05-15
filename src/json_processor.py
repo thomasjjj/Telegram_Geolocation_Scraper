@@ -3,7 +3,81 @@ import logging
 import os
 import time
 import pandas as pd
-from coordinates import extract_coordinates
+from src.coordinates import extract_coordinates
+
+
+def _get_elapsed_time(start_time):
+    """Get elapsed time since start in a readable format."""
+    elapsed = time.time() - start_time
+    if elapsed < 60:
+        return f"{elapsed:.1f}s"
+    elif elapsed < 3600:
+        minutes = int(elapsed // 60)
+        seconds = int(elapsed % 60)
+        return f"{minutes}m {seconds}s"
+    else:
+        hours = int(elapsed // 3600)
+        minutes = int((elapsed % 3600) // 60)
+        return f"{hours}h {minutes}m"
+
+
+def _get_processing_rate(messages_processed, start_time):
+    """Calculate the messages processing rate (messages per second)."""
+    elapsed = time.time() - start_time
+    if elapsed > 0:
+        return messages_processed / elapsed
+    return 0
+
+
+def _update_progress_display(messages_processed, coordinates_found, start_time, current_count, total_messages,
+                             last_count, force=False):
+    """Update the progress display with current stats."""
+    current_time = time.time()
+    elapsed = current_time - start_time
+
+    # Calculate percentage
+    percentage = (messages_processed / total_messages) * 100 if total_messages > 0 else 0
+
+    # Calculate processing rate since last update
+    time_since_last = current_time - (start_time if last_count == 0 else current_time - elapsed)
+    msgs_since_last = current_count - last_count
+
+    # Calculate current rate
+    current_rate = msgs_since_last / time_since_last if time_since_last > 0 else 0
+
+    # Calculate overall rate
+    overall_rate = _get_processing_rate(messages_processed, start_time)
+
+    # Estimate time remaining
+    if overall_rate > 0:
+        remaining_messages = total_messages - messages_processed
+        eta_seconds = remaining_messages / overall_rate
+        if eta_seconds < 60:
+            eta = f"{eta_seconds:.1f}s"
+        elif eta_seconds < 3600:
+            eta_m = int(eta_seconds // 60)
+            eta_s = int(eta_seconds % 60)
+            eta = f"{eta_m}m {eta_s}s"
+        else:
+            eta_h = int(eta_seconds // 3600)
+            eta_m = int((eta_seconds % 3600) // 60)
+            eta = f"{eta_h}h {eta_m}m"
+    else:
+        eta = "calculating..."
+
+    # Create progress status line
+    status = (
+        f"\rProgress: {percentage:.1f}% | "
+        f"Time: {_get_elapsed_time(start_time)} | "
+        f"Messages: {messages_processed}/{total_messages} | "
+        f"Coordinates: {coordinates_found} | "
+        f"Rate: {current_rate:.1f} msg/s | "
+        f"Avg: {overall_rate:.1f} msg/s | "
+        f"ETA: {eta}"
+    )
+
+    # Print without newline to overwrite the line
+    print(status, end='', flush=True)
 
 
 def process_telegram_json(json_file_path, post_link_base):
@@ -20,6 +94,9 @@ def process_telegram_json(json_file_path, post_link_base):
     messages_with_coordinates = []
     start_time = time.time()
     messages_processed = 0
+    last_status_update = start_time
+    status_update_interval = 0.5  # Update status every 0.5 seconds
+    last_count = 0
 
     try:
         # Open and load the JSON file
@@ -31,43 +108,28 @@ def process_telegram_json(json_file_path, post_link_base):
         total_messages = len(telegram_data.get('messages', []))
         logging.info(f"JSON file loaded. Processing {total_messages} messages")
 
-        # Progress tracking variables
-        progress_interval = max(1, int(total_messages / 20))  # Log progress 20 times
-        last_progress_time = time.time()
-        progress_time_interval = 2.0  # Seconds between progress logs
+        # Display initial progress
+        print(f"Processing {total_messages} messages from JSON file")
+        print("Live progress will show below - press Ctrl+C to cancel")
+        _update_progress_display(0, 0, start_time, 0, total_messages, last_count, force=True)
 
         # Iterate through each message in the JSON export
         for i, message in enumerate(telegram_data.get('messages', [])):
             messages_processed += 1
 
-            # Log progress at intervals or after specified time has passed
-            if (messages_processed % progress_interval == 0) or (
-                    time.time() - last_progress_time > progress_time_interval and messages_processed > 1):
-                elapsed = time.time() - start_time
-                percentage = (messages_processed / total_messages) * 100
-
-                # Calculate estimated time remaining
-                if messages_processed > 1:
-                    avg_time_per_message = elapsed / messages_processed
-                    remaining_messages = total_messages - messages_processed
-                    eta = avg_time_per_message * remaining_messages
-
-                    # Format ETA
-                    if eta < 60:
-                        eta_str = f"{eta:.1f}s"
-                    elif eta < 3600:
-                        eta_str = f"{int(eta // 60)}m {int(eta % 60)}s"
-                    else:
-                        eta_str = f"{int(eta // 3600)}h {int((eta % 3600) // 60)}m"
-
-                    logging.info(
-                        f"Progress: {percentage:.1f}% - Processed {messages_processed}/{total_messages} messages, "
-                        f"found {len(messages_with_coordinates)} coordinates. ETA: {eta_str}")
-                else:
-                    logging.info(
-                        f"Progress: {percentage:.1f}% - Processed {messages_processed}/{total_messages} messages")
-
-                last_progress_time = time.time()
+            # Update progress display
+            current_time = time.time()
+            if current_time - last_status_update >= status_update_interval:
+                _update_progress_display(
+                    messages_processed,
+                    len(messages_with_coordinates),
+                    start_time,
+                    messages_processed,
+                    total_messages,
+                    last_count
+                )
+                last_count = messages_processed
+                last_status_update = current_time
 
             text_field = str(message.get('text', ''))
             coordinates = extract_coordinates(text_field)
@@ -92,6 +154,19 @@ def process_telegram_json(json_file_path, post_link_base):
 
                 messages_with_coordinates.append(message_info)
                 logging.info(f"Coordinate found: {latitude}, {longitude} in message ID: {post_id}")
+
+        # Final progress update
+        _update_progress_display(
+            messages_processed,
+            len(messages_with_coordinates),
+            start_time,
+            messages_processed,
+            total_messages,
+            last_count,
+            force=True
+        )
+        # Add a newline after progress display
+        print()
 
         # Create DataFrame
         logging.info(f"Creating DataFrame with {len(messages_with_coordinates)} coordinates")
@@ -127,6 +202,8 @@ def process_telegram_json(json_file_path, post_link_base):
 
     except Exception as e:
         logging.error(f"Error processing JSON file: {e}")
+        # Print a newline in case exception occurred during progress display
+        print()
         # Return empty DataFrame with expected columns
         return pd.DataFrame(columns=[
             'Post Link', 'Post ID', 'Post Date', 'Post Message',
@@ -150,13 +227,19 @@ def save_dataframe_to_csv(df, csv_file_path):
         os.makedirs(os.path.dirname(csv_file_path) if os.path.dirname(csv_file_path) else '.', exist_ok=True)
 
         logging.info(f"Saving {len(df)} records to CSV file: {csv_file_path}")
+        print(f"Saving {len(df)} records to CSV file...")
         start_time = time.time()
+
+        # Show a simple progress indicator
+        print("Saving...", end="", flush=True)
 
         df.to_csv(csv_file_path, index=False, encoding='utf-8')
 
         elapsed = time.time() - start_time
+        print(f"\rSave completed in {elapsed:.2f} seconds      ")
         logging.info(f"DataFrame successfully saved to CSV file in {elapsed:.2f} seconds: {csv_file_path}")
         return True
     except Exception as e:
         logging.error(f"Failed to save DataFrame to CSV: {e}")
+        print(f"\rError: Failed to save DataFrame to CSV: {e}      ")
         return False
