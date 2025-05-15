@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import pandas as pd
-from coordinates import extract_coordinates
+from src.coordinates import extract_coordinates
 
 
 def process_telegram_json(json_file_path, post_link_base):

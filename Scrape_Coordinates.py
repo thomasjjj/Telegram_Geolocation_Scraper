@@ -3,10 +3,10 @@ import argparse
 import logging
 import os
 import sys
-from config import Config
-from client import TelegramCoordinatesClient
-from export import CoordinatesWriter
-from json_processor import process_telegram_json, save_dataframe_to_csv
+from config.config import Config
+from config.client import TelegramCoordinatesClient
+from src.export import CoordinatesWriter
+from src.json_processor import process_telegram_json, save_dataframe_to_csv
 from dotenv import load_dotenv, find_dotenv, set_key
 
 
