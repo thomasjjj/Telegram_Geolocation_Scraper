@@ -4,6 +4,8 @@
 
 This Python package extracts geographical coordinates from Telegram messages, supporting both decimal and DMS (Degrees, Minutes, Seconds) formats. It uses the [Telethon](https://github.com/LonamiWebs/Telethon) library to search through Telegram channels, groups, and chats, and can also process exported JSON chat histories.
 
+![image](https://github.com/user-attachments/assets/f3d4b32e-f3b6-413c-bc7d-ea90cc8367fc)
+
 ## Features
 
 - **Multiple Search Methods**:
