@@ -1,5 +1,5 @@
-import re
 import logging
+import re
 
 # Regular expression for coordinate patterns
 # Matches both decimal and DMS formats
