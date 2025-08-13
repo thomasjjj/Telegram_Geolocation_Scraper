@@ -2,7 +2,7 @@
 Example script showing how to use the new channel_scraper function
 """
 
-from src.channel_scraper import channel_scraper
+from Scrape_Coordinates import channel_scraper
 
 # Example of scraping a single channel
 # channel_scraper('WarArchive_ua', '2023-09-01', 'results/war_archive_coordinates.csv')
