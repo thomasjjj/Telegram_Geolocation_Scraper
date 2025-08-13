@@ -30,16 +30,30 @@ def _get_processing_rate(messages_processed, start_time):
 
 
 def _update_progress_display(messages_processed, coordinates_found, start_time, current_count, total_messages,
-                             last_count, force=False):
-    """Update the progress display with current stats."""
+                             last_count, last_update_time, force=False):
+    """Update the progress display with current stats.
+
+    Args:
+        messages_processed (int): Number of messages processed so far.
+        coordinates_found (int): Number of coordinate entries found.
+        start_time (float): Timestamp when processing started.
+        current_count (int): Current message count.
+        total_messages (int): Total number of messages to process.
+        last_count (int): Message count at previous update.
+        last_update_time (float): Timestamp of the previous update.
+        force (bool): Ignored, maintained for backward compatibility.
+
+    Returns:
+        float: The timestamp of this update for tracking purposes.
+    """
     current_time = time.time()
     elapsed = current_time - start_time
 
     # Calculate percentage
     percentage = (messages_processed / total_messages) * 100 if total_messages > 0 else 0
 
-    # Calculate processing rate since last update
-    time_since_last = current_time - (start_time if last_count == 0 else current_time - elapsed)
+    # Calculate processing rate since last update using provided timestamp
+    time_since_last = current_time - last_update_time if last_update_time else elapsed
     msgs_since_last = current_count - last_count
 
     # Calculate current rate
@@ -79,6 +93,8 @@ def _update_progress_display(messages_processed, coordinates_found, start_time, 
     # Print without newline to overwrite the line
     print(status, end='', flush=True)
 
+    return current_time
+
 
 def process_telegram_json(json_file_path, post_link_base):
     """
@@ -111,7 +127,16 @@ def process_telegram_json(json_file_path, post_link_base):
         # Display initial progress
         print(f"Processing {total_messages} messages from JSON file")
         print("Live progress will show below - press Ctrl+C to cancel")
-        _update_progress_display(0, 0, start_time, 0, total_messages, last_count, force=True)
+        last_status_update = _update_progress_display(
+            0,
+            0,
+            start_time,
+            0,
+            total_messages,
+            last_count,
+            last_status_update,
+            force=True,
+        )
 
         # Iterate through each message in the JSON export
         for i, message in enumerate(telegram_data.get('messages', [])):
@@ -120,16 +145,16 @@ def process_telegram_json(json_file_path, post_link_base):
             # Update progress display
             current_time = time.time()
             if current_time - last_status_update >= status_update_interval:
-                _update_progress_display(
+                last_status_update = _update_progress_display(
                     messages_processed,
                     len(messages_with_coordinates),
                     start_time,
                     messages_processed,
                     total_messages,
-                    last_count
+                    last_count,
+                    last_status_update,
                 )
                 last_count = messages_processed
-                last_status_update = current_time
 
             text_field = str(message.get('text', ''))
             coordinates = extract_coordinates(text_field)
@@ -156,14 +181,15 @@ def process_telegram_json(json_file_path, post_link_base):
                 logging.info(f"Coordinate found: {latitude}, {longitude} in message ID: {post_id}")
 
         # Final progress update
-        _update_progress_display(
+        last_status_update = _update_progress_display(
             messages_processed,
             len(messages_with_coordinates),
             start_time,
             messages_processed,
             total_messages,
             last_count,
-            force=True
+            last_status_update,
+            force=True,
         )
         # Add a newline after progress display
         print()
