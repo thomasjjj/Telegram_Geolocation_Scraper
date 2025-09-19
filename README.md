@@ -22,7 +22,8 @@ This Python package extracts geographical coordinates from Telegram messages, su
   - Message metadata (ID, date, text, source)
   - Direct links to the original messages
   - Latitude and longitude in decimal format
-  - CSV export for easy analysis and mapping
+  - CSV export for easy analysis
+  - Optional KML/KMZ export for direct use in Google Earth and GIS tools
 
 - **Configuration Options**:
   - Environment variables
@@ -100,13 +101,14 @@ For automated usage, you can use command-line arguments:
 
 ```bash
 # Search a specific channel
-python Scrape_Coordinates.py --mode channel --channel @channelname --output results.csv
+python Scrape_Coordinates.py --mode channel --channel @channelname --output results.csv --export-kml
 
-# Search all accessible chats
-python Scrape_Coordinates.py --mode all --output results.csv
+# Search all accessible chats and create a KMZ copy of the results
+python Scrape_Coordinates.py --mode all --output results.csv --export-kmz
 
-# Process a JSON export
-python Scrape_Coordinates.py --mode json --json-file export.json --post-link-base https://t.me/channelname/ --output results.csv
+# Process a JSON export and provide custom output filenames
+python Scrape_Coordinates.py --mode json --json-file export.json --post-link-base https://t.me/channelname/ \
+  --output results.csv --kml-output results/my_coordinates.kml --kmz-output results/my_coordinates.kmz
 ```
 
 ### Using as a Package
@@ -171,6 +173,12 @@ software. By default, files are placed in the `results/` directory (the folder
 is created automatically if it does not exist) and use the filename configured
 in `TELEGRAM_COORDINATES_CSV_FILE`.
 
+When the `--export-kml` or `--export-kmz` flags (or their corresponding
+`--kml-output` / `--kmz-output` paths) are provided, the scraper creates
+additional geospatial files alongside the CSV export. These files include the
+same metadata as the CSV and can be opened directly in mapping tools such as
+Google Earth, QGIS, or ArcGIS.
+
 | Column | Description |
 | --- | --- |
 | `Post ID` | Numeric identifier of the Telegram message. |
@@ -192,11 +200,10 @@ in `TELEGRAM_COORDINATES_CSV_FILE`.
 
 ### Google Earth
 
-1. Open Google Earth Pro
-2. Go to File > Import
-3. Select the CSV file
-4. Map the latitude and longitude columns
-5. Adjust display options
+1. Open Google Earth or Google Earth Pro
+2. Import the generated KML/KMZ file (or the CSV file if preferred)
+3. If importing CSV, map the latitude and longitude columns when prompted
+4. Adjust display options to style the placemarks
 
 ### GIS Tools
 

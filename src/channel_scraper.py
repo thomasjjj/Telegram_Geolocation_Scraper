@@ -15,6 +15,7 @@ from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 import pandas as pd
 
 from src.coordinates import extract_coordinates
+from src.export import save_dataframe_to_kml, save_dataframe_to_kmz
 
 
 async def scrape_channel(client, channel_id, date_limit, coordinate_pattern=None):
@@ -107,7 +108,8 @@ async def scrape_channel(client, channel_id, date_limit, coordinate_pattern=None
     return message_ids, message_texts, media_types, dates, sources, latitudes, longitudes
 
 
-def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_hash=None, session_name="simple_scraper"):
+def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_hash=None,
+                    session_name="simple_scraper", kml_output_path=None, kmz_output_path=None):
     """
     Scrape Telegram channels for coordinates and save results to CSV.
 
@@ -121,6 +123,8 @@ def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_has
         api_id (int, optional): Telegram API ID (can be set via environment)
         api_hash (str, optional): Telegram API hash (can be set via environment)
         session_name (str, optional): Name for the Telegram session
+        kml_output_path (str, optional): Path to save a KML export.
+        kmz_output_path (str, optional): Path to save a KMZ export.
 
     Returns:
         pandas.DataFrame: DataFrame with extracted coordinates
@@ -204,12 +208,20 @@ def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_has
         'longitude': longitudes
     })
 
-    # Save to CSV
+    # Save to CSV and optional geospatial formats
     if not df.empty:
         # Ensure the directory exists
         os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
         df.to_csv(output_path, index=False)
         print(f"Successfully saved {len(df)} coordinates to {output_path}")
+
+        if kml_output_path:
+            if save_dataframe_to_kml(df, kml_output_path):
+                print(f"Successfully saved KML to {kml_output_path}")
+
+        if kmz_output_path:
+            if save_dataframe_to_kmz(df, kmz_output_path):
+                print(f"Successfully saved KMZ to {kmz_output_path}")
     else:
         print("No coordinates found.")
 

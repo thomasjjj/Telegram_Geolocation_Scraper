@@ -15,6 +15,7 @@ from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 import pandas as pd
 
 from src.coordinates import extract_coordinates
+from src.export import save_dataframe_to_kml, save_dataframe_to_kmz
 
 
 async def scrape_channel(client, channel_id, date_limit, coordinate_pattern=None):
@@ -107,7 +108,8 @@ async def scrape_channel(client, channel_id, date_limit, coordinate_pattern=None
     return message_ids, message_texts, media_types, dates, sources, latitudes, longitudes
 
 
-def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_hash=None, session_name="simple_scraper"):
+def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_hash=None,
+                    session_name="simple_scraper", kml_output_path=None, kmz_output_path=None):
     """
     Scrape Telegram channels for coordinates and save results to CSV.
 
@@ -121,6 +123,8 @@ def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_has
         api_id (int, optional): Telegram API ID (can be set via environment)
         api_hash (str, optional): Telegram API hash (can be set via environment)
         session_name (str, optional): Name for the Telegram session
+        kml_output_path (str, optional): Path to save a KML export.
+        kmz_output_path (str, optional): Path to save a KMZ export.
 
     Returns:
         pandas.DataFrame: DataFrame with extracted coordinates
@@ -204,12 +208,20 @@ def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_has
         'longitude': longitudes
     })
 
-    # Save to CSV
+    # Save to CSV and optional geospatial formats
     if not df.empty:
         # Ensure the directory exists
         os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
         df.to_csv(output_path, index=False)
         print(f"Successfully saved {len(df)} coordinates to {output_path}")
+
+        if kml_output_path:
+            if save_dataframe_to_kml(df, kml_output_path):
+                print(f"Successfully saved KML to {kml_output_path}")
+
+        if kmz_output_path:
+            if save_dataframe_to_kmz(df, kmz_output_path):
+                print(f"Successfully saved KMZ to {kmz_output_path}")
     else:
         print("No coordinates found.")
 
@@ -252,6 +264,22 @@ def _build_arg_parser():
         default="INFO",
         choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
         help="Logging level for the scraper output (default: %(default)s).")
+    parser.add_argument(
+        "--export-kml",
+        action="store_true",
+        help="Also export results to a KML file using the CSV output path with a .kml extension.")
+    parser.add_argument(
+        "--export-kmz",
+        action="store_true",
+        help="Also export results to a KMZ file using the CSV output path with a .kmz extension.")
+    parser.add_argument(
+        "--kml-output",
+        default=None,
+        help="Custom path for the generated KML file. Overrides --export-kml default path.")
+    parser.add_argument(
+        "--kmz-output",
+        default=None,
+        help="Custom path for the generated KMZ file. Overrides --export-kmz default path.")
     return parser
 
 
@@ -261,11 +289,30 @@ def _configure_logging(level):
     logging.basicConfig(level=numeric_level, format="%(levelname)s: %(message)s")
 
 
+def _derive_output_path(base_path, new_extension):
+    """Generate an additional output path by swapping the file extension."""
+
+    base, ext = os.path.splitext(base_path)
+    if not base:
+        return base_path + new_extension
+    if ext.lower() == new_extension.lower():
+        return base_path
+    return base + new_extension
+
+
 if __name__ == "__main__":
     parser = _build_arg_parser()
     args = parser.parse_args()
 
     _configure_logging(args.log_level)
+
+    kml_output_path = args.kml_output
+    if args.export_kml and not kml_output_path:
+        kml_output_path = _derive_output_path(args.output, ".kml")
+
+    kmz_output_path = args.kmz_output
+    if args.export_kmz and not kmz_output_path:
+        kmz_output_path = _derive_output_path(args.output, ".kmz")
 
     # Invoke the scraper with CLI-provided arguments
     channel_scraper(
@@ -275,4 +322,6 @@ if __name__ == "__main__":
         api_id=args.api_id,
         api_hash=args.api_hash,
         session_name=args.session_name,
+        kml_output_path=kml_output_path,
+        kmz_output_path=kmz_output_path,
     )
