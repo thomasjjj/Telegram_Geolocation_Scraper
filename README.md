@@ -41,10 +41,16 @@ This Python package extracts geographical coordinates from Telegram messages, su
 
 ## Installation
 
+- **(Optional) Create a virtual environment**:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate  # On Windows use: .venv\\Scripts\\activate
+   ```
+
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/telegram-coordinates-scraper.git
-   cd telegram-coordinates-scraper
+   git clone https://github.com/<your-username>/Telegram_Geolocation_Scraper.git
+   cd Telegram_Geolocation_Scraper
    ```
 
 2. **Install dependencies**:
@@ -53,14 +59,19 @@ This Python package extracts geographical coordinates from Telegram messages, su
    ```
 
 3. **Configure Telegram API credentials**:
-   
+
+   Copy the provided template and fill in your values:
+   ```bash
+   cp example_credentials.env .env
+   ```
+
    Create a `.env` file with your Telegram API credentials:
    ```
    TELEGRAM_API_ID=your_api_id
    TELEGRAM_API_HASH=your_api_hash
    TELEGRAM_SESSION_NAME=coordinates_scraper_session
    ```
-   
+
    You can get your API credentials from [my.telegram.org](https://my.telegram.org/):
    1. Log in with your phone number
    2. Go to 'API development tools'
@@ -153,6 +164,30 @@ To process an exported Telegram chat:
    - Specify save location for the CSV
    - Enter base URL for post links (e.g., https://t.me/channelname/)
 
+## Output Files
+
+The tool writes results to CSV so they can be analyzed or imported into GIS
+software. By default, files are placed in the `results/` directory (the folder
+is created automatically if it does not exist) and use the filename configured
+in `TELEGRAM_COORDINATES_CSV_FILE`.
+
+| Column | Description |
+| --- | --- |
+| `Post ID` | Numeric identifier of the Telegram message. |
+| `Channel ID` | Internal Telegram ID for the channel or chat. |
+| `Channel/Group Username` | Public username of the chat when available. |
+| `Message Text` | Excerpt of the message that contained the coordinates. |
+| `Date` | Date the message was published. |
+| `URL` | Direct link to the original Telegram message. |
+| `Latitude` | Latitude in decimal degrees. |
+| `Longitude` | Longitude in decimal degrees. |
+
+> **Note:** Some entry points expose additional fields. For example, offline
+> JSON processing includes a `Post Link` column, and the simplified
+> `Scrape_Coordinates.py` CLI uses snake_case column names
+> (`message_id`, `message_source`, etc.) while providing the same underlying
+> information.
+
 ## Visualizing Results
 
 ### Google Earth
@@ -226,6 +261,34 @@ The tool loads configuration in the following order (later sources override earl
 - `TELEGRAM_COORDINATES_CSV_FILE`: Output CSV file path
 - `TELEGRAM_COORDINATES_LOG_FILE`: Log file path
 - `TELEGRAM_COORDINATES_LOG_LEVEL`: Logging level (INFO, DEBUG, etc.)
+
+### Config File (`config.ini`)
+
+For repeatable deployments, you can store settings in a `config.ini` file. The
+loader automatically checks the project root, `~/.telegram_coordinates_scraper/`
+and `/etc/telegram_coordinates_scraper/`. A minimal configuration looks like
+this:
+
+```ini
+[telegram]
+api_id = 123456
+api_hash = your_api_hash
+session_name = coordinates_scraper_session
+
+[search]
+search_terms = "E", "N", "S", "W", "Coordinates"
+
+[output]
+csv_file = results/coordinates_search_results.csv
+results_folder = results
+
+[logging]
+log_file = telegram_search.log
+log_level = INFO
+```
+
+Values from `config.ini` override the defaults and can be superseded by
+environment variables or command-line arguments when needed.
 
 ## Search Terms
 
