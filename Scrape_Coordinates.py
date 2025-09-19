@@ -214,3 +214,65 @@ def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_has
         print("No coordinates found.")
 
     return df
+
+
+def _build_arg_parser():
+    """Create the argument parser used for the CLI entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Scrape Telegram channels for coordinate pairs and export them to CSV.")
+    parser.add_argument(
+        "channels",
+        nargs="+",
+        help="One or more Telegram channel usernames or IDs to scrape.")
+    parser.add_argument(
+        "--date-limit",
+        required=True,
+        help="Only process messages newer than this YYYY-MM-DD date.")
+    parser.add_argument(
+        "--output",
+        required=True,
+        help="Path where the resulting CSV file should be written.")
+    parser.add_argument(
+        "--api-id",
+        type=int,
+        default=None,
+        help="Telegram API ID. Overrides the TELEGRAM_API_ID environment variable if provided.")
+    parser.add_argument(
+        "--api-hash",
+        default=None,
+        help="Telegram API hash. Overrides the TELEGRAM_API_HASH environment variable if provided.")
+    parser.add_argument(
+        "--session-name",
+        default="simple_scraper",
+        help="Name of the local Telethon session file to use (default: %(default)s).")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
+        help="Logging level for the scraper output (default: %(default)s).")
+    return parser
+
+
+def _configure_logging(level):
+    """Configure basic logging for the CLI."""
+    numeric_level = getattr(logging, level.upper(), logging.INFO)
+    logging.basicConfig(level=numeric_level, format="%(levelname)s: %(message)s")
+
+
+if __name__ == "__main__":
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    _configure_logging(args.log_level)
+
+    # Invoke the scraper with CLI-provided arguments
+    channel_scraper(
+        channel_links=args.channels,
+        date_limit=args.date_limit,
+        output_path=args.output,
+        api_id=args.api_id,
+        api_hash=args.api_hash,
+        session_name=args.session_name,
+    )
