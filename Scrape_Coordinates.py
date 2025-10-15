@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-import getpass
 import csv
 import datetime
+import getpass
 import json
 import logging
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from dotenv import load_dotenv, set_key
 from colorama import Fore, Style, init as colorama_init
+from pandas.errors import ParserError
 
 from src.channel_scraper import channel_scraper
 from src.database import CoordinatesDatabase
@@ -30,6 +32,7 @@ from src.validators import (
 
 try:
     from telethon import TelegramClient
+    from telethon.errors import RPCError
 except ImportError as exc:  # pragma: no cover - missing dependency is fatal
     raise SystemExit("Telethon must be installed to run the scraper") from exc
 
@@ -77,6 +80,8 @@ LOGGER = logging.getLogger(__name__)
 DbConfig = Dict[str, Any]
 RecommendationRecord = Dict[str, Any]
 SearchResult = Dict[str, Any]
+
+VISUALIZATION_ERRORS = (ValueError, OSError, sqlite3.DatabaseError, ParserError)
 
 
 def _validate_percentage(value: str) -> bool:
@@ -253,7 +258,7 @@ async def ensure_telegram_authentication(api_id: int, api_hash: str, session_nam
     try:
         await client.start(phone=phone_prompt, password=password_prompt)
         me = await client.get_me()
-    except Exception as exc:  # pragma: no cover - Telethon runtime interaction
+    except (RPCError, ValueError, OSError) as exc:  # pragma: no cover - Telethon runtime interaction
         LOGGER.error("Authentication failed for session '%s': %s", session_name, exc)
         raise SystemExit(f"Failed to authenticate with Telegram: {exc}") from exc
     else:
@@ -754,7 +759,7 @@ def _run_recommended_scrape(
                 recommendations = [recommendation_manager.get_recommended_channel(r["channel_id"])
                                    for r in recommendations]
                 recommendations = [r for r in recommendations if r is not None]
-            except Exception as exc:
+            except (RPCError, ValueError, OSError) as exc:
                 print(f"Enrichment failed: {exc}")
                 print("Continuing with available data...")
 
@@ -1059,7 +1064,7 @@ def enrich_recommendations_cli(
 
     try:
         asyncio.run(enrich_all())
-    except Exception as exc:  # pragma: no cover - Telethon runtime errors
+    except (RPCError, ValueError, OSError) as exc:  # pragma: no cover - Telethon runtime errors
         LOGGER.error("Failed to enrich recommendations: %s", exc)
 
 
@@ -1381,7 +1386,7 @@ Enter choice (1-9): """
             try:
                 create_map(csv_path, output)
                 print(f"Interactive map saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create map: {exc}")
 
         elif choice == "2":
@@ -1393,7 +1398,7 @@ Enter choice (1-9): """
                 visualizer = CoordinateVisualizer()
                 visualizer.from_database(database.db_path, output_html=output)
                 print(f"Interactive map saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create map: {exc}")
 
         elif choice == "3":
@@ -1412,7 +1417,7 @@ Enter choice (1-9): """
                 visualizer = CoordinateVisualizer()
                 visualizer.from_database(database.db_path, channel_id=int(channel_value), output_html=output)
                 print(f"Interactive map saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create map: {exc}")
 
         elif choice == "4":
@@ -1424,7 +1429,7 @@ Enter choice (1-9): """
             try:
                 create_map(csv_path, output, visualization_type="heatmap")
                 print(f"Heatmap saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create heatmap: {exc}")
 
         elif choice == "5":
@@ -1436,7 +1441,7 @@ Enter choice (1-9): """
             try:
                 create_map(csv_path, output, visualization_type="clusters")
                 print(f"Cluster map saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create cluster map: {exc}")
 
         elif choice == "6":
@@ -1448,7 +1453,7 @@ Enter choice (1-9): """
             try:
                 create_map(csv_path, output, visualization_type="hexagons")
                 print(f"3D hexagon map saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create 3D hexagon map: {exc}")
 
         elif choice == "7":
@@ -1462,7 +1467,7 @@ Enter choice (1-9): """
                     print("No forwarding relationships with coordinates found.")
                 else:
                     print(f"Forward network saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create forward network map: {exc}")
 
         elif choice == "8":
@@ -1475,7 +1480,7 @@ Enter choice (1-9): """
             try:
                 create_temporal_animation(csv_path, output, time_column=time_column)
                 print(f"Temporal animation saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create temporal animation: {exc}")
 
         elif choice == "9":

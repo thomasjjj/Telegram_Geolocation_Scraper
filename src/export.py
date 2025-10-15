@@ -246,7 +246,7 @@ class CoordinatesWriter:
                         self.rows.append(row)
         except FileNotFoundError:
             return
-        except Exception as exc:
+        except (OSError, csv.Error, UnicodeDecodeError) as exc:
             logging.warning(f"Failed to preload existing CSV data for export: {exc}")
 
     def __enter__(self):
@@ -279,7 +279,7 @@ class CoordinatesWriter:
             self.writer = _CSVProxyWriter(csv_writer, self)
             return self.writer
 
-        except Exception as e:
+        except (OSError, csv.Error) as e:
             logging.error(f"Failed to open CSV file: {e}")
             if self.file:
                 self.file.close()
@@ -367,7 +367,7 @@ def save_to_csv(data, csv_file_path, headers=None):
         logging.info(f"Data saved to CSV file: {csv_file_path}")
         return True
 
-    except Exception as e:
+    except (OSError, csv.Error) as e:
         logging.error(f"Failed to write to CSV file: {e}")
         return False
 
@@ -393,7 +393,7 @@ def save_records_to_kml(records: List[Dict[str, object]], kml_file_path: str,
 
         logging.info(f"Data saved to KML file: {kml_file_path}")
         return True
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logging.error(f"Failed to write to KML file: {e}")
         return False
 
@@ -419,7 +419,7 @@ def save_records_to_kmz(records: List[Dict[str, object]], kmz_file_path: str,
 
         logging.info(f"Data saved to KMZ file: {kmz_file_path}")
         return True
-    except Exception as e:
+    except (OSError, ValueError, zipfile.BadZipFile) as e:
         logging.error(f"Failed to write to KMZ file: {e}")
         return False
 

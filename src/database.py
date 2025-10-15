@@ -17,6 +17,7 @@ import json
 import logging
 import shutil
 import sqlite3
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -520,7 +521,7 @@ class CoordinatesDatabase:
 
         try:
             entity_bytes = bytes(entity.to_bytes())
-        except Exception as error:  # pragma: no cover - defensive
+        except (AttributeError, TypeError, ValueError) as error:  # pragma: no cover - defensive
             LOGGER.debug("Failed to serialise entity %s: %s", identifier, error)
             return False
 
@@ -582,7 +583,7 @@ class CoordinatesDatabase:
         try:
             reader = BinaryReader(bytes(raw_bytes))
             entity = reader.tgread_object()
-        except Exception as error:  # pragma: no cover - defensive
+        except (TypeError, ValueError, struct.error) as error:  # pragma: no cover - defensive
             LOGGER.debug("Failed to deserialize cached entity %s: %s", identifier, error)
             return None
 
