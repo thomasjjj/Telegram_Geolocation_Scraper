@@ -19,8 +19,14 @@ from src.channel_scraper import channel_scraper
 from src.database import CoordinatesDatabase
 from src.db_migration import detect_and_migrate_all_results, migrate_existing_csv_to_database
 from src.json_processor import process_telegram_json, save_dataframe_to_csv
-from src.recommendations import RecommendationManager
 from src.config import Config
+from src.recommendations import RecommendationManager
+from src.validators import (
+    prompt_validated,
+    validate_date,
+    validate_non_empty,
+    validate_positive_int,
+)
 
 try:
     from telethon import TelegramClient
@@ -60,6 +66,22 @@ DEFAULT_GEO_KEYWORDS = [
 colorama_init(autoreset=True)
 
 
+LOGGER = logging.getLogger(__name__)
+
+DbConfig = Dict[str, Any]
+RecommendationRecord = Dict[str, Any]
+SearchResult = Dict[str, Any]
+
+
+def _validate_percentage(value: str) -> bool:
+    """Return ``True`` if *value* is a non-negative float."""
+
+    try:
+        return float(value) >= 0.0
+    except ValueError:
+        return False
+
+
 MAIN_MENU = """
 === Telegram Coordinates Scraper ===
 
@@ -90,48 +112,69 @@ Enter choice (1-6): """
 
 
 def configure_logging() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    """Configure application-wide logging preferences."""
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger("telethon").setLevel(logging.WARNING)
+    LOGGER.debug("Logging configured.")
 
 
 def load_environment(env_path: Path) -> Config:
+    """Load configuration from the ``.env`` file located at *env_path*."""
+
     if not env_path.exists():
         env_path.touch()
+        LOGGER.info("Created environment file at %s", env_path)
+
+    LOGGER.debug("Loading configuration from %s", env_path)
     return Config(env_path)
 
 
-def ensure_api_credentials(env_path: Path, config: Config) -> tuple[int, str]:
-    api_id = config.api_id
-    if not api_id:
-        api_id = input("Enter your Telegram API ID: ").strip()
-        while not api_id.isdigit():
-            print("API ID must be numeric.")
-            api_id = input("Enter your Telegram API ID: ").strip()
-        set_key(str(env_path), "TELEGRAM_API_ID", api_id)
+def ensure_api_credentials(env_path: Path, config: Config) -> Tuple[int, str]:
+    """Ensure the Telegram API credentials are present and cached."""
+
+    api_id_value = config.api_id
+    if not api_id_value:
+        api_id_str = prompt_validated(
+            "Enter your Telegram API ID: ",
+            validate_positive_int,
+            error_msg="API ID must be a positive integer.",
+        )
+        api_id_value = int(api_id_str)
+        set_key(str(env_path), "TELEGRAM_API_ID", str(api_id_value))
         print("Saved API ID to .env")
-        os.environ["TELEGRAM_API_ID"] = api_id
-        api_id = int(api_id)
-    else:
-        os.environ["TELEGRAM_API_ID"] = str(api_id)
+        LOGGER.info("Stored API ID in %s", env_path)
+    os.environ["TELEGRAM_API_ID"] = str(api_id_value)
 
-    api_hash = config.api_hash
-    if not api_hash:
-        api_hash = input("Enter your Telegram API hash: ").strip()
-        while not api_hash:
-            print("API hash cannot be empty.")
-            api_hash = input("Enter your Telegram API hash: ").strip()
-        set_key(str(env_path), "TELEGRAM_API_HASH", api_hash)
+    api_hash_value = config.api_hash
+    if not api_hash_value:
+        api_hash_value = prompt_validated(
+            "Enter your Telegram API hash: ",
+            validate_non_empty,
+            error_msg="API hash cannot be empty.",
+        )
+        set_key(str(env_path), "TELEGRAM_API_HASH", api_hash_value)
         print("Saved API hash to .env")
-    os.environ["TELEGRAM_API_HASH"] = api_hash
+        LOGGER.info("Stored API hash in %s", env_path)
+    os.environ["TELEGRAM_API_HASH"] = api_hash_value
 
-    return int(api_id), api_hash
+    LOGGER.debug("API credentials ready for session initialisation.")
+    return int(api_id_value), api_hash_value
 
 
-def get_database_configuration(config: Config) -> dict:
-    return {
+def get_database_configuration(config: Config) -> DbConfig:
+    """Return a mapping containing the runtime database configuration."""
+
+    db_config: DbConfig = {
         "enabled": config.database_enabled,
         "path": config.database_path,
         "skip_existing": config.database_skip_existing,
     }
+    LOGGER.debug("Database configuration resolved: %s", db_config)
+    return db_config
 
 
 def get_default_session_name(config: Optional[Config] = None) -> str:
@@ -182,7 +225,7 @@ def prompt_session_name(
     session_name = prompt_with_smart_default(
         prompt,
         default_session,
-        validator=lambda value: bool(value.strip()),
+        validator=validate_non_empty,
     )
     os.environ["TELEGRAM_SESSION_NAME"] = session_name
     if env_path is not None:
@@ -194,6 +237,7 @@ async def ensure_telegram_authentication(api_id: int, api_hash: str, session_nam
     """Ensure the Telegram session is authenticated before continuing."""
 
     print(f"\nConnecting to Telegram using session '{session_name}' to verify authentication...")
+    LOGGER.info("Starting authentication check for session '%s'", session_name)
 
     phone_prompt = lambda: input("Enter your Telegram phone number (including country code): ").strip()
     password_prompt = lambda: getpass.getpass("Enter your Telegram 2FA password: ")
@@ -203,6 +247,7 @@ async def ensure_telegram_authentication(api_id: int, api_hash: str, session_nam
         await client.start(phone=phone_prompt, password=password_prompt)
         me = await client.get_me()
     except Exception as exc:  # pragma: no cover - Telethon runtime interaction
+        LOGGER.error("Authentication failed for session '%s': %s", session_name, exc)
         raise SystemExit(f"Failed to authenticate with Telegram: {exc}") from exc
     else:
         if me:
@@ -210,10 +255,13 @@ async def ensure_telegram_authentication(api_id: int, api_hash: str, session_nam
             display_name = " ".join(part for part in display_name_parts if part)
             identifier = getattr(me, "username", None) or display_name or str(getattr(me, "id", "unknown"))
             print(f"Authenticated as {identifier}.")
+            LOGGER.info("Authenticated Telegram session as %s", identifier)
         else:
             print("Authentication successful.")
+            LOGGER.info("Authentication succeeded without user details for session '%s'", session_name)
     finally:
         await client.disconnect()
+        LOGGER.debug("Disconnected temporary authentication client for session '%s'", session_name)
 
 
 def first_time_setup(config: Config) -> bool:
@@ -251,12 +299,19 @@ async def _search_dialogs_for_keywords(
     keywords: Iterable[str],
     message_limit: int = 200,
     days_limit: Optional[int] = None,
-):
+) -> List[SearchResult]:
     cutoff = None
     if days_limit is not None:
         cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days_limit)
 
-    results = []
+    LOGGER.debug(
+        "Searching dialogs for keywords with session '%s' (limit=%s, days_limit=%s)",
+        session_name,
+        message_limit,
+        days_limit,
+    )
+
+    results: List[SearchResult] = []
 
     async with TelegramClient(session_name, api_id, api_hash) as client:
         async for dialog in client.iter_dialogs():
@@ -290,6 +345,7 @@ async def _search_dialogs_for_keywords(
             if match_keyword:
                 results.append({"dialog": dialog, "entity": entity, "keyword": match_keyword, "excerpt": excerpt})
 
+    LOGGER.info("Found %d chats with potential keyword matches", len(results))
     return results
 
 
@@ -329,7 +385,14 @@ def _suggest_channels(
         if suggestions and suggestion_source is None:
             suggestion_source = "previously scraped channels"
 
-    return suggestions[:limit], suggestion_source
+    final_suggestions = suggestions[:limit]
+    if final_suggestions:
+        LOGGER.info(
+            "Providing %d suggested channel(s) sourced from %s",
+            len(final_suggestions),
+            suggestion_source or "unknown sources",
+        )
+    return final_suggestions, suggestion_source
 
 
 def prompt_channel_selection(
@@ -365,15 +428,13 @@ def prompt_channel_selection(
 
 
 def prompt_date_limit() -> Optional[str]:
-    while True:
-        date_limit_input = input("Enter the date limit (YYYY-MM-DD, leave blank for no limit): ").strip()
-        if not date_limit_input:
-            return None
-        try:
-            datetime.datetime.strptime(date_limit_input, "%Y-%m-%d")
-            return date_limit_input
-        except ValueError:
-            print("Invalid date format. Please use YYYY-MM-DD.")
+    value = prompt_validated(
+        "Enter the date limit (YYYY-MM-DD, leave blank for no limit): ",
+        validate_date,
+        error_msg="Invalid date format. Please use YYYY-MM-DD.",
+        allow_empty=True,
+    )
+    return value or None
 
 
 def _decode_sources(record: Dict[str, Any]) -> List[int]:
@@ -417,7 +478,7 @@ def _format_recommendation_line(index: int, recommendation: Dict[str, Any]) -> s
 def show_startup_recommendations(
     recommendation_manager: Optional[RecommendationManager],
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: DbConfig,
     api_id: int,
     api_hash: str,
 ) -> None:
@@ -457,7 +518,13 @@ def show_startup_recommendations(
     print("  L - Skip and continue to main menu")
     print()
 
-    choice = input("Enter choice (S/T/V/L): ").strip().upper()
+    choice = prompt_validated(
+        "Enter choice (S/T/V/L): ",
+        lambda value: value.upper() in {"S", "T", "V", "L"},
+        error_msg="Please choose S, T, V, or L.",
+        allow_empty=True,
+        empty_value="L",
+    ).upper()
     if choice == "S":
         scrape_recommended_channels_menu(
             recommendation_manager,
@@ -490,7 +557,7 @@ def show_startup_recommendations(
 
 def handle_specific_channel(
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: DbConfig,
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
@@ -518,7 +585,7 @@ def handle_specific_channel(
 
 def handle_search_all_chats(
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: DbConfig,
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
@@ -526,6 +593,7 @@ def handle_search_all_chats(
     env_path: Path,
 ) -> None:
     session_name = prompt_session_name("Enter the session name", config=config, env_path=env_path)
+    LOGGER.info("Searching all chats for geolocation keywords")
     results = asyncio.run(
         _search_dialogs_for_keywords(api_id=api_id, api_hash=api_hash, session_name=session_name, keywords=DEFAULT_GEO_KEYWORDS)
     )
@@ -560,6 +628,7 @@ def handle_search_all_chats(
 
     if not channels:
         print("No valid channels selected.")
+        LOGGER.warning("No channels selected after chat search")
         return
 
     channel_scraper(
@@ -580,7 +649,7 @@ def handle_search_all_chats(
 def scrape_recommended_channels_menu(
     recommendation_manager: Optional[RecommendationManager],
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: DbConfig,
     api_id: int,
     api_hash: str,
     mode: str = "interactive",
@@ -602,16 +671,21 @@ def scrape_recommended_channels_menu(
         print("4. Back")
         print()
 
-        choice = input("Enter choice (1-4): ").strip()
+        choice = prompt_validated(
+            "Enter choice (1-4): ",
+            lambda value: value in {"1", "2", "3", "4"},
+            error_msg="Please select an option between 1 and 4.",
+        )
         if choice == "1":
             recommendations = recommendation_manager.list_recommendations(status="pending")
         elif choice == "2":
-            limit_input = input("How many top recommendations to scrape? ").strip()
-            try:
-                limit = int(limit_input)
-            except ValueError:
-                print("Invalid number. Aborting.")
-                return
+            limit = int(
+                prompt_validated(
+                    "How many top recommendations to scrape? ",
+                    validate_positive_int,
+                    error_msg="Please enter a positive integer.",
+                )
+            )
             recommendations = recommendation_manager.get_top_recommendations(limit=limit)
         elif choice == "3":
             view_all_recommendations(recommendation_manager)
@@ -643,10 +717,10 @@ def scrape_recommended_channels_menu(
 def _run_recommended_scrape(
         recommendation_manager: RecommendationManager,
         database: Optional[CoordinatesDatabase],
-        db_config: dict,
+        db_config: DbConfig,
         api_id: int,
         api_hash: str,
-        recommendations: List[Dict[str, Any]],
+        recommendations: List[RecommendationRecord],
 ) -> None:
     from telethon.tl.types import PeerChannel
     from telethon import TelegramClient
@@ -684,12 +758,20 @@ def _run_recommended_scrape(
             identifiers.append(PeerChannel(channel_id))
 
     print(f"Preparing to scrape {len(identifiers)} channel(s).")
+    LOGGER.info("Scraping %d recommended channels", len(identifiers))
     confirm = input("Continue? (y/N): ").strip().lower()
     if confirm != "y":
         print("Cancelled.")
+        LOGGER.debug("User cancelled recommended channel scrape")
         return
 
-    date_limit = input("Enter date limit (YYYY-MM-DD, or press Enter for no limit): ").strip() or None
+    date_limit_value = prompt_validated(
+        "Enter date limit (YYYY-MM-DD, or press Enter for no limit): ",
+        validate_date,
+        error_msg="Invalid date format. Please use YYYY-MM-DD.",
+        allow_empty=True,
+    )
+    date_limit = date_limit_value or None
 
     channel_scraper(
         channel_links=identifiers,
@@ -715,10 +797,95 @@ def _run_recommended_scrape(
     print("\n✅ Scraping complete! Review new data through the database management menu.")
 
 
+def display_recommendation_menu() -> None:
+    """Print the recommendation management menu to stdout."""
+
+    print("Options:")
+    print("  1. View all pending recommendations")
+    print("  2. View top recommendations")
+    print("  3. Search recommendations")
+    print("  4. Scrape recommended channels")
+    print("  5. Accept/Reject recommendations")
+    print("  6. Enrich recommendations (fetch channel details)")
+    print("  7. Export recommendations to CSV")
+    print("  8. View forward analysis")
+    print("  9. Back to main menu")
+    print()
+
+
+def get_recommendation_choice() -> str:
+    """Return a validated menu selection for recommendation management."""
+
+    return prompt_validated(
+        "Enter choice (1-9): ",
+        lambda value: value in {str(i) for i in range(1, 10)},
+        error_msg="Please select an option between 1 and 9.",
+    )
+
+
+def _display_recommendation_overview(recommendation_manager: RecommendationManager) -> None:
+    """Print high level statistics about tracked recommendations."""
+
+    print("\n" + "=" * 60)
+    print("RECOMMENDED CHANNELS MANAGEMENT")
+    print("=" * 60)
+
+    stats = recommendation_manager.get_recommendation_statistics()
+    print(f"Total Recommended: {stats['total_recommended']}")
+    print(f"  Pending: {stats['pending']}")
+    print(f"  Accepted: {stats['accepted']}")
+    print(f"  Rejected: {stats['rejected']}")
+    print(f"  Inaccessible: {stats['inaccessible']}")
+    print()
+
+
+def execute_recommendation_action(
+    choice: str,
+    recommendation_manager: RecommendationManager,
+    database: Optional[CoordinatesDatabase],
+    db_config: DbConfig,
+    api_id: int,
+    api_hash: str,
+) -> bool:
+    """Execute the menu action mapped to *choice*.
+
+    Returns ``False`` when the caller should exit the menu.
+    """
+
+    if choice == "9":
+        LOGGER.debug("Exiting recommendation management menu")
+        return False
+
+    handlers: Dict[str, Callable[[], None]] = {
+        "1": lambda: view_all_recommendations(recommendation_manager),
+        "2": lambda: view_top_recommendations(recommendation_manager),
+        "3": lambda: search_recommendations_cli(recommendation_manager),
+        "4": lambda: scrape_recommended_channels_menu(
+            recommendation_manager,
+            database,
+            db_config,
+            api_id,
+            api_hash,
+        ),
+        "5": lambda: accept_reject_recommendations(recommendation_manager),
+        "6": lambda: enrich_recommendations_cli(recommendation_manager, api_id, api_hash),
+        "7": lambda: export_recommendations_cli(recommendation_manager),
+        "8": lambda: view_forward_analysis(recommendation_manager),
+    }
+
+    handler = handlers.get(choice)
+    if handler:
+        LOGGER.debug("Executing recommendation menu option %s", choice)
+        handler()
+    else:
+        print("Invalid choice. Please try again.")
+    return True
+
+
 def handle_recommendation_management(
     recommendation_manager: Optional[RecommendationManager],
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: DbConfig,
     api_id: int,
     api_hash: str,
 ) -> None:
@@ -727,58 +894,18 @@ def handle_recommendation_management(
         return
 
     while True:
-        print("\n" + "=" * 60)
-        print("RECOMMENDED CHANNELS MANAGEMENT")
-        print("=" * 60)
-
-        stats = recommendation_manager.get_recommendation_statistics()
-        print(f"Total Recommended: {stats['total_recommended']}")
-        print(f"  Pending: {stats['pending']}")
-        print(f"  Accepted: {stats['accepted']}")
-        print(f"  Rejected: {stats['rejected']}")
-        print(f"  Inaccessible: {stats['inaccessible']}")
-        print()
-
-        print("Options:")
-        print("  1. View all pending recommendations")
-        print("  2. View top recommendations")
-        print("  3. Search recommendations")
-        print("  4. Scrape recommended channels")
-        print("  5. Accept/Reject recommendations")
-        print("  6. Enrich recommendations (fetch channel details)")
-        print("  7. Export recommendations to CSV")
-        print("  8. View forward analysis")
-        print("  9. Back to main menu")
-        print()
-
-        choice = input("Enter choice (1-9): ").strip()
-
-        if choice == "1":
-            view_all_recommendations(recommendation_manager)
-        elif choice == "2":
-            view_top_recommendations(recommendation_manager)
-        elif choice == "3":
-            search_recommendations_cli(recommendation_manager)
-        elif choice == "4":
-            scrape_recommended_channels_menu(
-                recommendation_manager,
-                database,
-                db_config,
-                api_id,
-                api_hash,
-            )
-        elif choice == "5":
-            accept_reject_recommendations(recommendation_manager)
-        elif choice == "6":
-            enrich_recommendations_cli(recommendation_manager, api_id, api_hash)
-        elif choice == "7":
-            export_recommendations_cli(recommendation_manager)
-        elif choice == "8":
-            view_forward_analysis(recommendation_manager)
-        elif choice == "9":
+        _display_recommendation_overview(recommendation_manager)
+        display_recommendation_menu()
+        choice = get_recommendation_choice()
+        if not execute_recommendation_action(
+            choice,
+            recommendation_manager,
+            database,
+            db_config,
+            api_id,
+            api_hash,
+        ):
             break
-        else:
-            print("Invalid choice. Please try again.")
 
 
 def view_all_recommendations(recommendation_manager: RecommendationManager) -> None:
@@ -814,10 +941,11 @@ def view_top_recommendations(recommendation_manager: RecommendationManager, limi
 
 
 def search_recommendations_cli(recommendation_manager: RecommendationManager) -> None:
-    term = input("Enter search term (username, title, or ID): ").strip()
-    if not term:
-        print("Search term is required.")
-        return
+    term = prompt_validated(
+        "Enter search term (username, title, or ID): ",
+        validate_non_empty,
+        error_msg="Search term is required.",
+    )
     results = recommendation_manager.search_recommendations(term)
     if not results:
         print("No recommendations matched your search.")
@@ -855,7 +983,13 @@ def accept_reject_recommendations(recommendation_manager: RecommendationManager)
 
         print()
         print("Options: A - Accept | R - Reject | S - Skip | Q - Quit")
-        decision = input("Enter choice (A/R/S/Q): ").strip().upper()
+        decision = prompt_validated(
+            "Enter choice (A/R/S/Q): ",
+            lambda value: value.upper() in {"A", "R", "S", "Q"},
+            error_msg="Please choose A, R, S, or Q.",
+            allow_empty=True,
+            empty_value="S",
+        ).upper()
 
         if decision == "A":
             notes = input("Add notes (optional): ").strip() or None
@@ -912,11 +1046,17 @@ def enrich_recommendations_cli(
     try:
         asyncio.run(enrich_all())
     except Exception as exc:  # pragma: no cover - Telethon runtime errors
-        logging.error("Failed to enrich recommendations: %s", exc)
+        LOGGER.error("Failed to enrich recommendations: %s", exc)
 
 
 def export_recommendations_cli(recommendation_manager: RecommendationManager) -> None:
-    status = input("Export which status? (pending/accepted/rejected/all) [pending]: ").strip().lower() or "pending"
+    status = prompt_validated(
+        "Export which status? (pending/accepted/rejected/all) [pending]: ",
+        lambda value: value.lower() in {"pending", "accepted", "rejected", "all"},
+        error_msg="Please choose pending, accepted, rejected, or all.",
+        allow_empty=True,
+        empty_value="pending",
+    ).lower()
     if status == "all":
         records = recommendation_manager.export_recommendations(status=None)
     else:
@@ -971,15 +1111,21 @@ def view_forward_analysis(recommendation_manager: RecommendationManager) -> None
             f"{row['coord_count']:<9} {row['source_diversity']:<7}"
         )
 def handle_process_json(database: Optional[CoordinatesDatabase]) -> None:
-    json_file = input("Enter the path to the Telegram JSON export: ").strip()
-    if not json_file:
-        print("JSON file path is required.")
-        return
+    json_file = prompt_validated(
+        "Enter the path to the Telegram JSON export: ",
+        validate_non_empty,
+        error_msg="JSON file path is required.",
+    )
 
-    post_link_base = input("Enter the base URL for post links (e.g. https://t.me/channel/): ").strip()
+    post_link_base = prompt_validated(
+        "Enter the base URL for post links (e.g. https://t.me/channel/): ",
+        validate_non_empty,
+        error_msg="A base URL is required.",
+    )
     if not post_link_base.endswith("/"):
         post_link_base += "/"
 
+    LOGGER.info("Processing Telegram JSON export located at %s", json_file)
     df = process_telegram_json(json_file, post_link_base)
     if df.empty:
         print("No coordinates were found in the JSON file.")
@@ -995,11 +1141,12 @@ def handle_process_json(database: Optional[CoordinatesDatabase]) -> None:
             imported = migrate_existing_csv_to_database(csv_path, database)
             database.vacuum_database()
             print(f"Imported {imported} coordinate rows into the database.")
+            LOGGER.info("Imported %d coordinate rows from JSON export", imported)
 
 
 def handle_scan_known_channels(
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: DbConfig,
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
@@ -1008,12 +1155,13 @@ def handle_scan_known_channels(
         print("Database support is disabled.")
         return
 
-    min_density_input = input("Minimum coordinate density percentage to include (default 0): ").strip()
-    try:
-        min_density = float(min_density_input) if min_density_input else 0.0
-    except ValueError:
-        print("Invalid density value. Using 0%.")
-        min_density = 0.0
+    min_density_input = prompt_validated(
+        "Minimum coordinate density percentage to include (default 0): ",
+        _validate_percentage,
+        error_msg="Please enter a non-negative number.",
+        allow_empty=True,
+    )
+    min_density = float(min_density_input) if min_density_input else 0.0
 
     channels = database.get_channels_with_coordinates(min_density=min_density)
     if not channels:
@@ -1030,7 +1178,13 @@ def handle_scan_known_channels(
         print(f"{idx:>2}. {title} ({username or channel['id']}) - density {density:.2f}% - coords {coords} - last {last_scraped}")
 
     print("\nOptions:\nA - Scan all channels\nS - Select specific channels (comma-separated)\nC - Cancel")
-    choice = input("Enter choice: ").strip().upper() or "A"
+    choice = prompt_validated(
+        "Enter choice: ",
+        lambda value: value.upper() in {"A", "S", "C"},
+        error_msg="Please choose A, S, or C.",
+        allow_empty=True,
+        empty_value="A",
+    ).upper()
 
     if choice == "C":
         return
@@ -1051,6 +1205,7 @@ def handle_scan_known_channels(
         return
 
     identifiers = [channel.get("username") or channel["id"] for channel in selected]
+    LOGGER.info("Scanning %d known channel(s) for coordinates", len(identifiers))
 
     channel_scraper(
         channel_links=identifiers,
@@ -1119,17 +1274,22 @@ def handle_database_management(database: Optional[CoordinatesDatabase]) -> None:
 Enter choice: """
 
     while True:
-        choice = input(menu).strip()
+        choice = prompt_validated(
+            menu,
+            lambda value: value in {str(i) for i in range(1, 8)},
+            error_msg="Please select an option between 1 and 7.",
+        )
         if choice == "1":
             path = input("Enter CSV export path: ").strip() or "results/database_export.csv"
             df = database.export_to_dataframe()
             df.to_csv(path, index=False)
             print(f"Exported {len(df)} rows to {path}")
         elif choice == "2":
-            channel_identifier = input("Enter channel ID: ").strip()
-            if not channel_identifier.isdigit():
-                print("Channel ID must be numeric.")
-                continue
+            channel_identifier = prompt_validated(
+                "Enter channel ID: ",
+                validate_positive_int,
+                error_msg="Channel ID must be numeric.",
+            )
             df = database.export_to_dataframe(int(channel_identifier))
             if df.empty:
                 print("No records found for the specified channel.")
@@ -1167,7 +1327,7 @@ Enter choice: """
 
 def handle_advanced_options(
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: DbConfig,
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
@@ -1175,7 +1335,11 @@ def handle_advanced_options(
     env_path: Path,
 ) -> None:
     while True:
-        choice = input(ADVANCED_MENU).strip()
+        choice = prompt_validated(
+            ADVANCED_MENU,
+            lambda value: value in {str(i) for i in range(1, 7)},
+            error_msg="Please choose an option from 1 to 6.",
+        )
         if choice == "1":
             handle_search_all_chats(
                 database,
@@ -1238,7 +1402,11 @@ def main() -> None:
     )
 
     while True:
-        choice = input(MAIN_MENU).strip()
+        choice = prompt_validated(
+            MAIN_MENU,
+            lambda value: value in {"1", "2", "3", "4"},
+            error_msg="Please choose an option from 1 to 4.",
+        )
         if choice == "1":
             handle_specific_channel(
                 database,
