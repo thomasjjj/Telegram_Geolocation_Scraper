@@ -1,7 +1,8 @@
-import json
 import logging
 import os
 import time
+
+import ijson
 import pandas as pd
 from src.coordinates import extract_coordinates
 
@@ -96,6 +97,16 @@ def _update_progress_display(messages_processed, coordinates_found, start_time, 
     return current_time
 
 
+def _count_messages(json_file_path):
+    """Count the total number of messages in a Telegram JSON export using streaming."""
+    try:
+        with open(json_file_path, 'rb') as f:
+            return sum(1 for _ in ijson.items(f, 'messages.item'))
+    except Exception as exc:
+        logging.warning(f"Unable to count messages in JSON file due to: {exc}")
+        return 0
+
+
 def process_telegram_json(json_file_path, post_link_base):
     """
     Process a Telegram JSON export file to extract coordinates.
@@ -115,17 +126,18 @@ def process_telegram_json(json_file_path, post_link_base):
     last_count = 0
 
     try:
-        # Open and load the JSON file
-        logging.info(f"Loading JSON file: {json_file_path}")
-        with open(json_file_path, 'r', encoding='utf-8') as f:
-            telegram_data = json.load(f)
-
-        # Get total number of messages for progress tracking
-        total_messages = len(telegram_data.get('messages', []))
-        logging.info(f"JSON file loaded. Processing {total_messages} messages")
+        logging.info(f"Counting messages in JSON file: {json_file_path}")
+        total_messages = _count_messages(json_file_path)
+        if total_messages:
+            logging.info(f"JSON file ready. Processing {total_messages} messages")
+        else:
+            logging.info("JSON file ready. Processing messages (total unknown)")
 
         # Display initial progress
-        print(f"Processing {total_messages} messages from JSON file")
+        if total_messages:
+            print(f"Processing {total_messages} messages from JSON file")
+        else:
+            print("Processing messages from JSON file (total unknown)")
         print("Live progress will show below - press Ctrl+C to cancel")
         last_status_update = _update_progress_display(
             0,
@@ -139,46 +151,47 @@ def process_telegram_json(json_file_path, post_link_base):
         )
 
         # Iterate through each message in the JSON export
-        for i, message in enumerate(telegram_data.get('messages', [])):
-            messages_processed += 1
+        with open(json_file_path, 'rb') as f:
+            for message in ijson.items(f, 'messages.item'):
+                messages_processed += 1
 
-            # Update progress display
-            current_time = time.time()
-            if current_time - last_status_update >= status_update_interval:
-                last_status_update = _update_progress_display(
-                    messages_processed,
-                    len(messages_with_coordinates),
-                    start_time,
-                    messages_processed,
-                    total_messages,
-                    last_count,
-                    last_status_update,
-                )
-                last_count = messages_processed
+                # Update progress display
+                current_time = time.time()
+                if current_time - last_status_update >= status_update_interval:
+                    last_status_update = _update_progress_display(
+                        messages_processed,
+                        len(messages_with_coordinates),
+                        start_time,
+                        messages_processed,
+                        total_messages,
+                        last_count,
+                        last_status_update,
+                    )
+                    last_count = messages_processed
 
-            text_field = str(message.get('text', ''))
-            coordinates = extract_coordinates(text_field)
+                text_field = str(message.get('text', ''))
+                coordinates = extract_coordinates(text_field)
 
-            if coordinates:
-                latitude, longitude = coordinates
-                post_id = message.get('id', 'N/A')
-                post_date = message.get('date', 'N/A')
-                post_type = message.get('type', 'N/A')
-                post_text = text_field
-                media_type = message.get('media_type', 'N/A')
+                if coordinates:
+                    latitude, longitude = coordinates
+                    post_id = message.get('id', 'N/A')
+                    post_date = message.get('date', 'N/A')
+                    post_type = message.get('type', 'N/A')
+                    post_text = text_field
+                    media_type = message.get('media_type', 'N/A')
 
-                message_info = {
-                    'Post ID': post_id,
-                    'Post Date': post_date,
-                    'Post Message': post_text,
-                    'Post Type': post_type,
-                    'Media Type': media_type,
-                    'Latitude': latitude,
-                    'Longitude': longitude
-                }
+                    message_info = {
+                        'Post ID': post_id,
+                        'Post Date': post_date,
+                        'Post Message': post_text,
+                        'Post Type': post_type,
+                        'Media Type': media_type,
+                        'Latitude': latitude,
+                        'Longitude': longitude
+                    }
 
-                messages_with_coordinates.append(message_info)
-                logging.info(f"Coordinate found: {latitude}, {longitude} in message ID: {post_id}")
+                    messages_with_coordinates.append(message_info)
+                    logging.info(f"Coordinate found: {latitude}, {longitude} in message ID: {post_id}")
 
         # Final progress update
         last_status_update = _update_progress_display(
