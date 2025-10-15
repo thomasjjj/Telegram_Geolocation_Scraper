@@ -32,6 +32,7 @@ from src.validators import (
 
 try:
     from telethon import TelegramClient
+    from telethon.tl.types import PeerChannel
     from telethon.errors import RPCError
 except ImportError as exc:  # pragma: no cover - missing dependency is fatal
     raise SystemExit("Telethon must be installed to run the scraper") from exc
@@ -740,8 +741,6 @@ def _run_recommended_scrape(
         api_hash: str,
         recommendations: List[RecommendationRecord],
 ) -> None:
-    from telethon import TelegramClient
-
     # First, try to enrich any channels without usernames
     needs_enrichment = [r for r in recommendations if not r.get("username")]
     if needs_enrichment:
