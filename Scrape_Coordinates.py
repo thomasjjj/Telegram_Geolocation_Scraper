@@ -459,8 +459,12 @@ def _decode_sources(record: Dict[str, Any]) -> List[int]:
 
 def _format_recommendation_line(index: int, recommendation: Dict[str, Any]) -> str:
     username = recommendation.get("username")
-    title = recommendation.get("title") or username or f"ID:{recommendation['channel_id']}"
-    username_display = f"@{username}" if username else f"ID:{recommendation['channel_id']}"
+    title = recommendation.get("title")
+    channel_id = recommendation["channel_id"]
+
+    display_title = title or username or f"ID:{channel_id}"
+    username_display = f"@{username}" if username else "Unavailable"
+    id_display = f"ID:{channel_id}"
     score = recommendation.get("recommendation_score", 0.0)
     forward_count = int(recommendation.get("forward_count") or 0)
     coord_count = int(recommendation.get("coordinate_forward_count") or 0)
@@ -474,7 +478,9 @@ def _format_recommendation_line(index: int, recommendation: Dict[str, Any]) -> s
         indicator = "📌"
 
     line = [
-        f"{index}. {indicator} {title} ({username_display})",
+        f"{index}. {indicator} {display_title}",
+        f"   Username: {username_display}",
+        f"   Channel ID: {id_display}",
         f"   Score: {score:.1f}/100 | {coord_count}/{forward_count} forwards contained coordinates",
     ]
     if sources:
