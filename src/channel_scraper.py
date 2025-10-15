@@ -305,7 +305,7 @@ async def _process_message_batch(
                 }
             )
 
-            LOGGER.info(
+            LOGGER.debug(
                 "Retrieved coordinate (%s, %s) from message %s in channel %s",
                 record["latitude"],
                 record["longitude"],
@@ -360,6 +360,15 @@ async def _process_message_batch(
                         rec_channel_id,
                         exc,
                     )
+
+    LOGGER.info(
+        "Processed batch for channel %s: %s messages, %s inserted, %s skipped, %s coordinates",
+        channel_display_name,
+        len(messages_to_process),
+        batch_stats["inserted"],
+        batch_stats["skipped"],
+        batch_stats["coordinates"],
+    )
 
     return batch_stats
 
