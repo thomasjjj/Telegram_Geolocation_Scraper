@@ -113,40 +113,34 @@ python Scrape_Coordinates.py --mode json --json-file export.json --post-link-bas
 
 ### Using as a Package
 
-You can also use the tool as a Python package:
+You can also import the scraper in your own scripts. The `channel_scraper`
+function handles the asynchronous work for you and returns a Pandas
+`DataFrame` with the collected coordinates. The previous
+`TelegramCoordinatesClient` helper has been removed in favor of the
+consolidated `channel_scraper` entry point:
 
 ```python
-import asyncio
-from telegram_coordinates_scraper import Config, TelegramCoordinatesClient, CoordinatesWriter
+from src.channel_scraper import channel_scraper
 
-async def main():
-    # Initialize configuration
-    config = Config()
-    
-    # Get credentials and settings
-    api_id, api_hash = config.get_telegram_credentials()
-    session_name = config.get_session_name()
-    search_terms = config.get_search_terms()
-    csv_file = config.get_output_file()
-    
-    # Initialize client
-    client = TelegramCoordinatesClient(api_id, api_hash, session_name)
-    await client.start()
-    
-    try:
-        # Search a specific channel
-        channel = "@channelname"
-        entity = await client.get_entity(channel)
-        
-        with CoordinatesWriter(csv_file) as writer:
-            found = await client.search_channel(entity, search_terms, writer)
-            print(f"Found {found} coordinates")
-    finally:
-        await client.disconnect()
+def main():
+    df = channel_scraper(
+        channel_links=["@channelname"],
+        date_limit="2023-09-01",
+        output_path="results.csv",
+    )
+
+    if df.empty:
+        print("No coordinates found")
+    else:
+        print(f"Saved {len(df)} coordinates to results.csv")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
 ```
+
+If you prefer to provide credentials programmatically, pass `api_id` and
+`api_hash` directly to `channel_scraper`. Otherwise, the function falls back to
+the `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` environment variables.
 
 ## Processing JSON Exports
 
@@ -250,52 +244,27 @@ m.save('coordinates_map.html')
 
 All operations are logged to both console and file (`telegram_search.log`). The default log level is INFO, which can be changed in the configuration.
 
-## Configuration Options
+## Configuration
 
-The tool loads configuration in the following order (later sources override earlier ones):
+All runtime settings are sourced from environment variables, which are loaded
+from a local `.env` file. The interactive entry point will create this file on
+first run and prompt for any missing credentials, storing them for future use.
 
-1. Default values
-2. Environment variables
-3. Config file
-4. Command-line arguments
-
-### Environment Variables
+Key variables include:
 
 - `TELEGRAM_API_ID`: Your Telegram API ID
 - `TELEGRAM_API_HASH`: Your Telegram API hash
-- `TELEGRAM_SESSION_NAME`: Session name for Telethon
-- `TELEGRAM_SEARCH_TERMS`: Comma-separated list of search terms
-- `TELEGRAM_COORDINATES_CSV_FILE`: Output CSV file path
-- `TELEGRAM_COORDINATES_LOG_FILE`: Log file path
-- `TELEGRAM_COORDINATES_LOG_LEVEL`: Logging level (INFO, DEBUG, etc.)
+- `TELEGRAM_SESSION_NAME`: Session name for Telethon (defaults to
+  `simple_scraper`)
+- `DATABASE_ENABLED`: Enable or disable persistence to the SQLite database
+  (`true` by default)
+- `DATABASE_PATH`: Path to the SQLite database file (`telegram_coordinates.db`
+  by default)
+- `DATABASE_SKIP_EXISTING`: Skip messages that have already been processed
+  (`true` by default)
 
-### Config File (`config.ini`)
-
-For repeatable deployments, you can store settings in a `config.ini` file. The
-loader automatically checks the project root, `~/.telegram_coordinates_scraper/`
-and `/etc/telegram_coordinates_scraper/`. A minimal configuration looks like
-this:
-
-```ini
-[telegram]
-api_id = 123456
-api_hash = your_api_hash
-session_name = coordinates_scraper_session
-
-[search]
-search_terms = "E", "N", "S", "W", "Coordinates"
-
-[output]
-csv_file = results/coordinates_search_results.csv
-results_folder = results
-
-[logging]
-log_file = telegram_search.log
-log_level = INFO
-```
-
-Values from `config.ini` override the defaults and can be superseded by
-environment variables or command-line arguments when needed.
+Additional custom settings can be added to `.env` as needed; they become
+available through the lightweight `Config` helper in `src/config.py`.
 
 ## Search Terms
 
