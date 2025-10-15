@@ -12,13 +12,14 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from dotenv import load_dotenv, set_key
+from dotenv import set_key
 
 from src.channel_scraper import channel_scraper
 from src.database import CoordinatesDatabase
 from src.db_migration import detect_and_migrate_all_results, migrate_existing_csv_to_database
 from src.json_processor import process_telegram_json, save_dataframe_to_csv
 from src.recommendations import RecommendationManager
+from src.config import Config
 
 try:
     from telethon import TelegramClient
@@ -88,14 +89,14 @@ def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
-def load_environment(env_path: Path) -> None:
-    load_dotenv(dotenv_path=env_path)
+def load_environment(env_path: Path) -> Config:
     if not env_path.exists():
         env_path.touch()
+    return Config(env_path)
 
 
-def ensure_api_credentials(env_path: Path) -> tuple[int, str]:
-    api_id = os.environ.get("TELEGRAM_API_ID")
+def ensure_api_credentials(env_path: Path, config: Config) -> tuple[int, str]:
+    api_id = config.api_id
     if not api_id:
         api_id = input("Enter your Telegram API ID: ").strip()
         while not api_id.isdigit():
@@ -103,9 +104,12 @@ def ensure_api_credentials(env_path: Path) -> tuple[int, str]:
             api_id = input("Enter your Telegram API ID: ").strip()
         set_key(str(env_path), "TELEGRAM_API_ID", api_id)
         print("Saved API ID to .env")
-    os.environ["TELEGRAM_API_ID"] = api_id
+        os.environ["TELEGRAM_API_ID"] = api_id
+        api_id = int(api_id)
+    else:
+        os.environ["TELEGRAM_API_ID"] = str(api_id)
 
-    api_hash = os.environ.get("TELEGRAM_API_HASH")
+    api_hash = config.api_hash
     if not api_hash:
         api_hash = input("Enter your Telegram API hash: ").strip()
         while not api_hash:
@@ -118,24 +122,25 @@ def ensure_api_credentials(env_path: Path) -> tuple[int, str]:
     return int(api_id), api_hash
 
 
-def get_database_configuration() -> dict:
+def get_database_configuration(config: Config) -> dict:
     return {
-        "enabled": os.environ.get("DATABASE_ENABLED", "true").lower() == "true",
-        "path": os.environ.get("DATABASE_PATH", "telegram_coordinates.db"),
-        "skip_existing": os.environ.get("DATABASE_SKIP_EXISTING", "true").lower() == "true",
+        "enabled": config.database_enabled,
+        "path": config.database_path,
+        "skip_existing": config.database_skip_existing,
     }
 
 
-def get_default_session_name() -> str:
-    return os.environ.get("TELEGRAM_SESSION_NAME", "simple_scraper")
+def get_default_session_name(config: Config) -> str:
+    return config.session_name
 
 
-def prompt_session_name() -> str:
-    default_session = get_default_session_name()
+def prompt_session_name(config: Config, env_path: Path) -> str:
+    default_session = get_default_session_name(config)
     session_name = (
         input(f"Enter Telegram session name to use [{default_session}]: ").strip() or default_session
     )
     os.environ["TELEGRAM_SESSION_NAME"] = session_name
+    set_key(str(env_path), "TELEGRAM_SESSION_NAME", session_name)
     return session_name
 
 
@@ -1073,13 +1078,13 @@ def handle_advanced_options(
 def main() -> None:
     configure_logging()
     env_path = Path(__file__).resolve().parent / ".env"
-    load_environment(env_path)
-    api_id, api_hash = ensure_api_credentials(env_path)
+    config = load_environment(env_path)
+    api_id, api_hash = ensure_api_credentials(env_path, config)
 
-    session_name = prompt_session_name()
+    session_name = prompt_session_name(config, env_path)
     asyncio.run(ensure_telegram_authentication(api_id, api_hash, session_name))
 
-    db_config = get_database_configuration()
+    db_config = get_database_configuration(config)
     database = CoordinatesDatabase(db_config["path"]) if db_config["enabled"] else None
     recommendation_manager = RecommendationManager(database) if database else None
 

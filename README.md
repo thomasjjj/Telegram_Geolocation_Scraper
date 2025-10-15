@@ -244,52 +244,27 @@ m.save('coordinates_map.html')
 
 All operations are logged to both console and file (`telegram_search.log`). The default log level is INFO, which can be changed in the configuration.
 
-## Configuration Options
+## Configuration
 
-The tool loads configuration in the following order (later sources override earlier ones):
+All runtime settings are sourced from environment variables, which are loaded
+from a local `.env` file. The interactive entry point will create this file on
+first run and prompt for any missing credentials, storing them for future use.
 
-1. Default values
-2. Environment variables
-3. Config file
-4. Command-line arguments
-
-### Environment Variables
+Key variables include:
 
 - `TELEGRAM_API_ID`: Your Telegram API ID
 - `TELEGRAM_API_HASH`: Your Telegram API hash
-- `TELEGRAM_SESSION_NAME`: Session name for Telethon
-- `TELEGRAM_SEARCH_TERMS`: Comma-separated list of search terms
-- `TELEGRAM_COORDINATES_CSV_FILE`: Output CSV file path
-- `TELEGRAM_COORDINATES_LOG_FILE`: Log file path
-- `TELEGRAM_COORDINATES_LOG_LEVEL`: Logging level (INFO, DEBUG, etc.)
+- `TELEGRAM_SESSION_NAME`: Session name for Telethon (defaults to
+  `simple_scraper`)
+- `DATABASE_ENABLED`: Enable or disable persistence to the SQLite database
+  (`true` by default)
+- `DATABASE_PATH`: Path to the SQLite database file (`telegram_coordinates.db`
+  by default)
+- `DATABASE_SKIP_EXISTING`: Skip messages that have already been processed
+  (`true` by default)
 
-### Config File (`config.ini`)
-
-For repeatable deployments, you can store settings in a `config.ini` file. The
-loader automatically checks the project root, `~/.telegram_coordinates_scraper/`
-and `/etc/telegram_coordinates_scraper/`. A minimal configuration looks like
-this:
-
-```ini
-[telegram]
-api_id = 123456
-api_hash = your_api_hash
-session_name = coordinates_scraper_session
-
-[search]
-search_terms = "E", "N", "S", "W", "Coordinates"
-
-[output]
-csv_file = results/coordinates_search_results.csv
-results_folder = results
-
-[logging]
-log_file = telegram_search.log
-log_level = INFO
-```
-
-Values from `config.ini` override the defaults and can be superseded by
-environment variables or command-line arguments when needed.
+Additional custom settings can be added to `.env` as needed; they become
+available through the lightweight `Config` helper in `src/config.py`.
 
 ## Search Terms
 
