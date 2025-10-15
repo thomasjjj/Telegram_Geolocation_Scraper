@@ -233,6 +233,13 @@ def prompt_session_name(
     config: Optional[Config] = None,
     env_path: Optional[Path] = None,
 ) -> str:
+    existing_session = os.environ.get("TELEGRAM_SESSION_NAME")
+    if existing_session:
+        os.environ["TELEGRAM_SESSION_NAME"] = existing_session
+        if env_path is not None:
+            set_key(str(env_path), "TELEGRAM_SESSION_NAME", existing_session)
+        return existing_session
+
     default_session = get_default_session_name(config)
     session_name = prompt_with_smart_default(
         prompt,
