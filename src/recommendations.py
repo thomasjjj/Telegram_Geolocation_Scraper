@@ -26,6 +26,7 @@ class RecommendationSettings:
 
     enabled: bool = True
     min_score: float = 30.0
+    min_hit_rate: float = 5.0
     show_at_startup: bool = True
     auto_enrich: bool = False
     max_display: int = 5
@@ -34,6 +35,10 @@ class RecommendationSettings:
     telegram_auto_harvest: bool = False
     telegram_harvest_after_scrape: bool = False
     telegram_max_source_channels: Optional[int] = None
+    quality_weight: float = 0.6
+    trust_weight: float = 0.4
+    penalize_low_sample: bool = True
+    hide_zero_coordinates: bool = False
 
     @classmethod
     def from_environment(cls) -> "RecommendationSettings":
@@ -46,6 +51,7 @@ class RecommendationSettings:
 
         enabled = _as_bool(os.environ.get("RECOMMENDATIONS_ENABLED"), True)
         min_score = float(os.environ.get("RECOMMENDATIONS_MIN_SCORE", 30.0))
+        min_hit_rate = float(os.environ.get("RECOMMENDATIONS_MIN_HIT_RATE", 5.0))
         show_at_startup = _as_bool(os.environ.get("RECOMMENDATIONS_SHOW_AT_STARTUP"), True)
         auto_enrich = _as_bool(os.environ.get("RECOMMENDATIONS_AUTO_ENRICH"), False)
         max_display = int(os.environ.get("RECOMMENDATIONS_MAX_DISPLAY", 5))
@@ -79,6 +85,15 @@ class RecommendationSettings:
             telegram_auto_harvest=telegram_auto_harvest,
             telegram_harvest_after_scrape=telegram_harvest_after_scrape,
             telegram_max_source_channels=telegram_max_source_channels,
+            min_hit_rate=min_hit_rate,
+            quality_weight=float(os.environ.get("RECOMMENDATIONS_QUALITY_WEIGHT", 0.6)),
+            trust_weight=float(os.environ.get("RECOMMENDATIONS_TRUST_WEIGHT", 0.4)),
+            penalize_low_sample=_as_bool(
+                os.environ.get("RECOMMENDATIONS_PENALTY_LOW_SAMPLE"), True
+            ),
+            hide_zero_coordinates=_as_bool(
+                os.environ.get("RECOMMENDATIONS_HIDE_ZERO_COORDS"), False
+            ),
         )
 
 
@@ -470,36 +485,53 @@ class RecommendationManager:
         self,
         limit: int = 10,
         min_score: Optional[float] = None,
+        min_hit_rate: Optional[float] = None,
         status: Optional[str] = "pending",
     ) -> List[Dict[str, Any]]:
-        """Return highest scoring recommended channels."""
+        """Return highest scoring recommended channels with optional hit rate filter."""
 
         if not self.settings.enabled:
             return []
 
         min_score_value = self.settings.min_score if min_score is None else min_score
-        params: List[Any] = []
-        conditions: List[str] = []
-
-        if min_score_value is not None:
-            conditions.append("recommendation_score >= ?")
-            params.append(min_score_value)
-        if status:
-            conditions.append("user_status = ?")
-            params.append(status)
-
-        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        params.append(limit)
-        rows = self.db.query(
-            f"""
-            SELECT * FROM recommended_channels
-            {where_clause}
-            ORDER BY recommendation_score DESC, coordinate_forward_count DESC
-            LIMIT ?
-            """,
-            params,
+        min_hit_rate_value = (
+            self.settings.min_hit_rate if min_hit_rate is None else min_hit_rate
         )
-        return [dict(row) for row in rows]
+
+        recommendations = self.list_recommendations(
+            status=status,
+            order_by="recommendation_score DESC, coordinate_forward_count DESC",
+            limit=None,
+        )
+
+        filtered: List[Dict[str, Any]] = []
+        for rec in recommendations:
+            score_value = float(rec.get("recommendation_score") or 0.0)
+            if min_score_value is not None and score_value < min_score_value:
+                continue
+
+            forward_count = int(rec.get("forward_count") or 0)
+            coord_count = int(rec.get("coordinate_forward_count") or 0)
+
+            if self.settings.hide_zero_coordinates and coord_count == 0:
+                continue
+
+            if min_hit_rate_value is not None:
+                if forward_count > 0:
+                    hit_rate = (coord_count / forward_count) * 100
+                    if hit_rate < min_hit_rate_value:
+                        continue
+                else:
+                    # No sample yet – keep unless explicitly hidden
+                    if self.settings.hide_zero_coordinates:
+                        continue
+
+            filtered.append(rec)
+
+            if len(filtered) >= limit:
+                break
+
+        return filtered
 
     def list_recommendations(
         self,
@@ -522,6 +554,43 @@ class RecommendationManager:
             params,
         )
         return [dict(row) for row in rows]
+
+    def recalculate_all_scores(self, verbose: bool = False) -> int:
+        """Recalculate recommendation scores for every channel.
+
+        Returns the number of records whose score changed.
+        """
+
+        rows = self.db.query("SELECT * FROM recommended_channels ORDER BY channel_id")
+        updated = 0
+
+        for row in rows:
+            channel_id = row["channel_id"]
+            old_score = float(row.get("recommendation_score") or 0.0)
+            new_score = self.calculate_recommendation_score(dict(row))
+
+            if abs(new_score - old_score) <= 0.1:
+                continue
+
+            self.db.update_recommended_channel(
+                channel_id,
+                {"recommendation_score": new_score},
+            )
+            updated += 1
+
+            if verbose:
+                forward_count = int(row.get("forward_count") or 0)
+                coord_count = int(row.get("coordinate_forward_count") or 0)
+                hit_rate = (coord_count / forward_count * 100) if forward_count else 0.0
+                LOGGER.info(
+                    "Recalculated score for %s: %.1f -> %.1f (hit rate %.1f%%)",
+                    row.get("username") or channel_id,
+                    old_score,
+                    new_score,
+                    hit_rate,
+                )
+
+        return updated
 
     def search_recommendations(self, term: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
         term_like = f"%{term.lower()}%"
@@ -673,33 +742,52 @@ class RecommendationManager:
 
     # ------------------------------------------------------------------
     # Scoring
-    @staticmethod
-    def calculate_recommendation_score(channel_data: Dict[str, Any]) -> float:
-        score = 0.0
+    def calculate_recommendation_score(self, channel_data: Dict[str, Any]) -> float:
+        """Calculate a recommendation score that prioritises coordinate hit rate."""
 
         forward_count = int(channel_data.get("forward_count") or 0)
-        score += min(30.0, forward_count * 2.0)
-
         coordinate_forward_count = int(channel_data.get("coordinate_forward_count") or 0)
-        if forward_count > 0:
-            hit_rate = coordinate_forward_count / forward_count
-            score += hit_rate * 25.0
 
-        telegram_rec_count = int(channel_data.get("telegram_recommendation_count", 0) or 0)
-        if telegram_rec_count > 0:
-            score += min(20.0, telegram_rec_count * 4.0)
+        if forward_count == 0:
+            # Neutral score for channels we have not yet observed.
+            return 50.0
 
-            avg_source_density = float(channel_data.get("telegram_rec_source_density", 0.0) or 0.0)
-            if avg_source_density > 10.0:
-                score += 15.0
-            elif avg_source_density > 5.0:
-                score += 10.0
-            elif avg_source_density > 0.0:
-                score += 5.0
+        hit_rate = coordinate_forward_count / forward_count if forward_count else 0.0
 
-        discovery_method = channel_data.get("discovery_method")
-        if discovery_method == "telegram_api":
-            score += 5.0
+        if hit_rate >= 0.80:
+            quality_score = 60.0
+        elif hit_rate >= 0.60:
+            quality_score = 55.0
+        elif hit_rate >= 0.40:
+            quality_score = 45.0
+        elif hit_rate >= 0.20:
+            quality_score = 30.0
+        elif hit_rate >= 0.10:
+            quality_score = 15.0
+        elif hit_rate >= 0.05:
+            quality_score = 5.0
+        else:
+            quality_score = 0.0
+
+        if forward_count >= 200:
+            confidence_modifier = 1.25
+        elif forward_count >= 100:
+            confidence_modifier = 1.2
+        elif forward_count >= 50:
+            confidence_modifier = 1.1
+        elif forward_count >= 20:
+            confidence_modifier = 1.0
+        elif forward_count >= 10:
+            confidence_modifier = 0.9
+        else:
+            confidence_modifier = 0.8
+
+        base_score = quality_score * confidence_modifier
+
+        if self.settings.penalize_low_sample and forward_count < 20:
+            base_score *= 0.85
+
+        trust_score = 0.0
 
         source_count = 0
         sources_raw = channel_data.get("discovered_from_channels")
@@ -713,9 +801,18 @@ class RecommendationManager:
                 sources_list = sources_raw
             if isinstance(sources_list, (list, tuple, set)):
                 source_count = len({int(item) for item in sources_list if isinstance(item, int)})
-        score += min(15.0, source_count * 3.0)
+
+        if source_count >= 5:
+            trust_score += 15.0
+        elif source_count >= 3:
+            trust_score += 10.0
+        elif source_count >= 2:
+            trust_score += 5.0
+        elif source_count >= 1:
+            trust_score += 2.0
 
         last_seen_value = channel_data.get("last_seen")
+        last_seen_dt: Optional[datetime]
         if last_seen_value:
             if isinstance(last_seen_value, str):
                 try:
@@ -729,26 +826,60 @@ class RecommendationManager:
             if last_seen_dt:
                 days_since = (datetime.now(timezone.utc) - last_seen_dt).days
                 if days_since < 7:
-                    score += 10.0
+                    trust_score += 10.0
                 elif days_since < 30:
-                    score += 5.0
+                    trust_score += 7.0
+                elif days_since < 90:
+                    trust_score += 3.0
+        else:
+            last_seen_dt = None
 
         if channel_data.get("is_verified"):
-            score += 10.0
-        if channel_data.get("is_scam") or channel_data.get("is_fake"):
-            score -= 50.0
+            trust_score += 10.0
 
         subscriber_count = channel_data.get("subscriber_count") or 0
         try:
             subscriber_count = int(subscriber_count)
         except (TypeError, ValueError):
             subscriber_count = 0
-        if subscriber_count > 10000:
-            score += 5.0
-        elif subscriber_count > 1000:
-            score += 2.0
 
-        return max(0.0, min(100.0, score))
+        if subscriber_count > 100000:
+            trust_score += 5.0
+        elif subscriber_count > 10000:
+            trust_score += 3.0
+        elif subscriber_count > 1000:
+            trust_score += 1.0
+
+        telegram_rec_count = int(channel_data.get("telegram_recommendation_count", 0) or 0)
+        if telegram_rec_count > 0:
+            avg_source_density = float(channel_data.get("telegram_rec_source_density", 0.0) or 0.0)
+            if avg_source_density > 10.0:
+                trust_score += 10.0
+            elif avg_source_density > 5.0:
+                trust_score += 5.0
+            elif avg_source_density > 0.0:
+                trust_score += 2.0
+
+        if channel_data.get("is_scam") or channel_data.get("is_fake"):
+            return 0.0
+
+        if channel_data.get("is_accessible") is False:
+            base_score *= 0.5
+
+        quality_weight = self.settings.quality_weight or 0.0
+        trust_weight = self.settings.trust_weight or 0.0
+
+        # Normalise weights relative to default values so existing behaviour matches defaults.
+        quality_multiplier = quality_weight / 0.6 if quality_weight else 0.0
+        trust_multiplier = trust_weight / 0.4 if trust_weight else 0.0
+
+        if not quality_multiplier and not trust_multiplier:
+            quality_multiplier = 1.0
+            trust_multiplier = 1.0
+
+        final_score = (base_score * quality_multiplier) + (trust_score * trust_multiplier)
+        final_score = min(100.0, max(0.0, final_score))
+        return final_score
 
 
 __all__ = ["RecommendationManager", "RecommendationSettings"]
