@@ -502,17 +502,47 @@ def scrape_recommended_channels_menu(
 
 
 def _run_recommended_scrape(
-    recommendation_manager: RecommendationManager,
-    database: Optional[CoordinatesDatabase],
-    db_config: dict,
-    api_id: int,
-    api_hash: str,
-    recommendations: List[Dict[str, Any]],
+        recommendation_manager: RecommendationManager,
+        database: Optional[CoordinatesDatabase],
+        db_config: dict,
+        api_id: int,
+        api_hash: str,
+        recommendations: List[Dict[str, Any]],
 ) -> None:
-    identifiers: List[str] = []
+    from telethon.tl.types import PeerChannel
+    from telethon import TelegramClient
+
+    # First, try to enrich any channels without usernames
+    needs_enrichment = [r for r in recommendations if not r.get("username")]
+    if needs_enrichment:
+        print(f"\n{len(needs_enrichment)} channel(s) need enrichment to fetch usernames.")
+        enrich = input("Enrich them now? (y/N): ").strip().lower()
+        if enrich == "y":
+            async def enrich_batch():
+                async with TelegramClient("recommended_scrape", api_id, api_hash) as client:
+                    for rec in needs_enrichment:
+                        await recommendation_manager.enrich_recommendation(client, rec["channel_id"])
+
+            try:
+                asyncio.run(enrich_batch())
+                # Reload recommendations to get updated data
+                recommendations = [recommendation_manager.get_recommended_channel(r["channel_id"])
+                                   for r in recommendations]
+                recommendations = [r for r in recommendations if r is not None]
+            except Exception as exc:
+                print(f"Enrichment failed: {exc}")
+                print("Continuing with available data...")
+
+    identifiers: List[str | PeerChannel] = []
     for recommendation in recommendations:
         username = recommendation.get("username")
-        identifiers.append(username or str(recommendation["channel_id"]))
+        if username:
+            # Use username if available (most reliable)
+            identifiers.append(username)
+        else:
+            # For numeric IDs, create a PeerChannel object
+            channel_id = recommendation["channel_id"]
+            identifiers.append(PeerChannel(channel_id))
 
     print(f"Preparing to scrape {len(identifiers)} channel(s).")
     confirm = input("Continue? (y/N): ").strip().lower()
