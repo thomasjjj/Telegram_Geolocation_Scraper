@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-import getpass
 import csv
 import datetime
+import getpass
 import json
 import logging
 import os
+import sqlite3
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from dotenv import load_dotenv, set_key
 from colorama import Fore, Style, init as colorama_init
+from pandas.errors import ParserError
 
 from src.channel_scraper import channel_scraper
 from src.database import CoordinatesDatabase
@@ -31,6 +33,7 @@ from src.validators import (
 try:
     from telethon import TelegramClient
     from telethon.tl.types import PeerChannel
+    from telethon.errors import RPCError
 except ImportError as exc:  # pragma: no cover - missing dependency is fatal
     raise SystemExit("Telethon must be installed to run the scraper") from exc
 
@@ -78,6 +81,8 @@ LOGGER = logging.getLogger(__name__)
 DbConfig = Dict[str, Any]
 RecommendationRecord = Dict[str, Any]
 SearchResult = Dict[str, Any]
+
+VISUALIZATION_ERRORS = (ValueError, OSError, sqlite3.DatabaseError, ParserError)
 
 
 def _validate_percentage(value: str) -> bool:
@@ -254,7 +259,7 @@ async def ensure_telegram_authentication(api_id: int, api_hash: str, session_nam
     try:
         await client.start(phone=phone_prompt, password=password_prompt)
         me = await client.get_me()
-    except Exception as exc:  # pragma: no cover - Telethon runtime interaction
+    except (RPCError, ValueError, OSError) as exc:  # pragma: no cover - Telethon runtime interaction
         LOGGER.error("Authentication failed for session '%s': %s", session_name, exc)
         raise SystemExit(f"Failed to authenticate with Telegram: {exc}") from exc
     else:
@@ -460,8 +465,12 @@ def _decode_sources(record: Dict[str, Any]) -> List[int]:
 
 def _format_recommendation_line(index: int, recommendation: Dict[str, Any]) -> str:
     username = recommendation.get("username")
-    title = recommendation.get("title") or username or f"ID:{recommendation['channel_id']}"
-    username_display = f"@{username}" if username else f"ID:{recommendation['channel_id']}"
+    title = recommendation.get("title")
+    channel_id = recommendation["channel_id"]
+
+    display_title = title or username or f"ID:{channel_id}"
+    username_display = f"@{username}" if username else "Unavailable"
+    id_display = f"ID:{channel_id}"
     score = recommendation.get("recommendation_score", 0.0)
     forward_count = int(recommendation.get("forward_count") or 0)
     coord_count = int(recommendation.get("coordinate_forward_count") or 0)
@@ -475,7 +484,9 @@ def _format_recommendation_line(index: int, recommendation: Dict[str, Any]) -> s
         indicator = "📌"
 
     line = [
-        f"{index}. {indicator} {title} ({username_display})",
+        f"{index}. {indicator} {display_title}",
+        f"   Username: {username_display}",
+        f"   Channel ID: {id_display}",
         f"   Score: {score:.1f}/100 | {coord_count}/{forward_count} forwards contained coordinates",
     ]
     if sources:
@@ -747,20 +758,22 @@ def _run_recommended_scrape(
                 recommendations = [recommendation_manager.get_recommended_channel(r["channel_id"])
                                    for r in recommendations]
                 recommendations = [r for r in recommendations if r is not None]
-            except Exception as exc:
+            except (RPCError, ValueError, OSError) as exc:
                 print(f"Enrichment failed: {exc}")
                 print("Continuing with available data...")
 
-    identifiers: List[str | PeerChannel] = []
+    identifiers: List[Union[str, PeerChannel]] = []
     for recommendation in recommendations:
         username = recommendation.get("username")
         if username:
             # Use username if available (most reliable)
             identifiers.append(username)
         else:
-            # For numeric IDs, create a PeerChannel object
             channel_id = recommendation["channel_id"]
-            identifiers.append(PeerChannel(channel_id))
+            # Telethon expects identifiers that it can resolve via ``get_entity``.
+            # Using a ``PeerChannel`` instance here would require an ``access_hash``,
+            # so fallback to the channel ID string instead.
+            identifiers.append(str(channel_id))
 
     print(f"Preparing to scrape {len(identifiers)} channel(s).")
     LOGGER.info("Scraping %d recommended channels", len(identifiers))
@@ -1050,7 +1063,7 @@ def enrich_recommendations_cli(
 
     try:
         asyncio.run(enrich_all())
-    except Exception as exc:  # pragma: no cover - Telethon runtime errors
+    except (RPCError, ValueError, OSError) as exc:  # pragma: no cover - Telethon runtime errors
         LOGGER.error("Failed to enrich recommendations: %s", exc)
 
 
@@ -1372,7 +1385,7 @@ Enter choice (1-9): """
             try:
                 create_map(csv_path, output)
                 print(f"Interactive map saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create map: {exc}")
 
         elif choice == "2":
@@ -1384,7 +1397,7 @@ Enter choice (1-9): """
                 visualizer = CoordinateVisualizer()
                 visualizer.from_database(database.db_path, output_html=output)
                 print(f"Interactive map saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create map: {exc}")
 
         elif choice == "3":
@@ -1403,7 +1416,7 @@ Enter choice (1-9): """
                 visualizer = CoordinateVisualizer()
                 visualizer.from_database(database.db_path, channel_id=int(channel_value), output_html=output)
                 print(f"Interactive map saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create map: {exc}")
 
         elif choice == "4":
@@ -1415,7 +1428,7 @@ Enter choice (1-9): """
             try:
                 create_map(csv_path, output, visualization_type="heatmap")
                 print(f"Heatmap saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create heatmap: {exc}")
 
         elif choice == "5":
@@ -1427,7 +1440,7 @@ Enter choice (1-9): """
             try:
                 create_map(csv_path, output, visualization_type="clusters")
                 print(f"Cluster map saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create cluster map: {exc}")
 
         elif choice == "6":
@@ -1439,7 +1452,7 @@ Enter choice (1-9): """
             try:
                 create_map(csv_path, output, visualization_type="hexagons")
                 print(f"3D hexagon map saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create 3D hexagon map: {exc}")
 
         elif choice == "7":
@@ -1453,7 +1466,7 @@ Enter choice (1-9): """
                     print("No forwarding relationships with coordinates found.")
                 else:
                     print(f"Forward network saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create forward network map: {exc}")
 
         elif choice == "8":
@@ -1466,7 +1479,7 @@ Enter choice (1-9): """
             try:
                 create_temporal_animation(csv_path, output, time_column=time_column)
                 print(f"Temporal animation saved to {output}")
-            except Exception as exc:
+            except VISUALIZATION_ERRORS as exc:
                 print(f"Failed to create temporal animation: {exc}")
 
         elif choice == "9":

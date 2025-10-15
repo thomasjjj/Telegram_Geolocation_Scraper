@@ -17,9 +17,10 @@ import json
 import logging
 import shutil
 import sqlite3
+import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from telethon.extensions import BinaryReader
 
@@ -520,7 +521,7 @@ class CoordinatesDatabase:
 
         try:
             entity_bytes = bytes(entity.to_bytes())
-        except Exception as error:  # pragma: no cover - defensive
+        except (AttributeError, TypeError, ValueError) as error:  # pragma: no cover - defensive
             LOGGER.debug("Failed to serialise entity %s: %s", identifier, error)
             return False
 
@@ -582,7 +583,7 @@ class CoordinatesDatabase:
         try:
             reader = BinaryReader(bytes(raw_bytes))
             entity = reader.tgread_object()
-        except Exception as error:  # pragma: no cover - defensive
+        except (TypeError, ValueError, struct.error) as error:  # pragma: no cover - defensive
             LOGGER.debug("Failed to deserialize cached entity %s: %s", identifier, error)
             return None
 
@@ -600,15 +601,21 @@ class CoordinatesDatabase:
     def update_channel_statistics(self, channel_id: int) -> bool:
         connection = self.connect()
         cursor = connection.execute(
-            "SELECT COUNT(*) AS total, SUM(has_coordinates) AS coord_count FROM messages WHERE channel_id=?",
+            """
+            SELECT
+                COUNT(*) AS total,
+                COALESCE(SUM(has_coordinates), 0) AS coord_count
+            FROM messages
+            WHERE channel_id=?
+            """,
             (channel_id,),
         )
         row = cursor.fetchone()
         if not row:
             return False
 
-        total = int(row["total"] or 0)
-        coord_count = int(row["coord_count"] or 0)
+        total = int(row["total"])
+        coord_count = int(row["coord_count"])
         density = (coord_count / total) * 100 if total else 0.0
 
         try:
@@ -686,11 +693,13 @@ class CoordinatesDatabase:
     # ------------------------------------------------------------------
     # Recommendation system helpers
 
-    def query(self, sql: str, params: Sequence[Any] | None = None) -> List[sqlite3.Row]:
+    def query(self, sql: str, params: Optional[Sequence[Any]] = None) -> List[sqlite3.Row]:
         cursor = self.connect().execute(sql, params or [])
         return cursor.fetchall()
 
-    def query_one(self, sql: str, params: Sequence[Any] | None = None) -> Optional[sqlite3.Row]:
+    def query_one(
+        self, sql: str, params: Optional[Sequence[Any]] = None
+    ) -> Optional[sqlite3.Row]:
         cursor = self.connect().execute(sql, params or [])
         return cursor.fetchone()
 
@@ -698,7 +707,7 @@ class CoordinatesDatabase:
         self,
         table: str,
         where: Optional[str] = None,
-        params: Sequence[Any] | None = None,
+        params: Optional[Sequence[Any]] = None,
     ) -> int:
         sql = f"SELECT COUNT(*) FROM {table}"
         if where:
@@ -820,7 +829,7 @@ class CoordinatesDatabase:
         from_channel_id: int,
         to_channel_id: int,
         had_coordinates: bool,
-        forward_date: Optional[_dt.datetime] | Optional[str] = None,
+        forward_date: Optional[Union[_dt.datetime, str]] = None,
         forward_signature: Optional[str] = None,
     ) -> bool:
         if message_ref is None:
@@ -932,14 +941,30 @@ class CoordinatesDatabase:
         total_messages = connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         total_coordinates = connection.execute("SELECT COUNT(*) FROM coordinates").fetchone()[0]
         channel_counts = connection.execute(
-            "SELECT COUNT(*), SUM(is_active) FROM channels"
+            """
+            SELECT
+                COUNT(*) AS total_channels,
+                COALESCE(SUM(is_active), 0) AS active_channels
+            FROM channels
+            """
         ).fetchone()
-        tracked_channels = channel_counts[0] if channel_counts else 0
-        active_channels = channel_counts[1] if channel_counts else 0
+        tracked_channels = (
+            int(channel_counts["total_channels"]) if channel_counts else 0
+        )
+        active_channels = (
+            int(channel_counts["active_channels"]) if channel_counts else 0
+        )
         average_density_row = connection.execute(
-            "SELECT AVG(coordinate_density) FROM channels WHERE total_messages > 0"
+            """
+            SELECT
+                COALESCE(AVG(coordinate_density), 0.0) AS average_density
+            FROM channels
+            WHERE total_messages > 0
+            """
         ).fetchone()
-        average_density = float(average_density_row[0]) if average_density_row and average_density_row[0] is not None else 0.0
+        average_density = (
+            float(average_density_row["average_density"]) if average_density_row else 0.0
+        )
         last_scrape_row = connection.execute(
             "SELECT MAX(last_scraped) FROM channels"
         ).fetchone()

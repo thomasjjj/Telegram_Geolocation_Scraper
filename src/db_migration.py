@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -121,7 +122,7 @@ def detect_and_migrate_all_results(results_folder: str = "results", database: Op
             imported = migrate_existing_csv_to_database(str(csv_file), database)
             LOGGER.info("Imported %s coordinate rows from %s", imported, csv_file)
             total_imported += imported
-        except Exception as error:  # pragma: no cover - best effort import
+        except (OSError, ValueError, pd.errors.ParserError, sqlite3.DatabaseError) as error:  # pragma: no cover - best effort import
             LOGGER.error("Failed to migrate %s: %s", csv_file, error)
 
     return total_imported

@@ -41,12 +41,25 @@ def dms_to_decimal(degrees, minutes, seconds, direction):
         returns None.
     :rtype: float | None
     """
+    if not isinstance(direction, str):
+        logging.error("Invalid direction type provided for DMS conversion")
+        return None
+
+    direction = direction.strip().upper()
+    if not direction:
+        logging.error("Empty direction provided for DMS conversion")
+        return None
+
+    if direction not in {"N", "S", "E", "W"}:
+        logging.error("Invalid direction value provided for DMS conversion")
+        return None
+
     try:
         degrees = float(degrees if degrees is not None else 0)
         minutes = float(minutes if minutes is not None else 0)
         seconds = float(seconds if seconds is not None else 0)
         decimal = degrees + minutes / 60 + seconds / 3600
-        if direction.upper() in ['S', 'W']:
+        if direction in {"S", "W"}:
             decimal = -decimal
         return decimal
     except ValueError as e:

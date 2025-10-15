@@ -246,7 +246,7 @@ class CoordinatesWriter:
                         self.rows.append(row)
         except FileNotFoundError:
             return
-        except Exception as exc:
+        except (OSError, csv.Error, UnicodeDecodeError) as exc:
             logging.warning(f"Failed to preload existing CSV data for export: {exc}")
 
     def __enter__(self):
@@ -257,6 +257,7 @@ class CoordinatesWriter:
         try:
             self.file = open(self.csv_file_path, 'a', newline='', encoding='utf-8')
             csv_writer = csv.writer(self.file)
+            self.writer = _CSVProxyWriter(csv_writer, self)
 
             if not self.file_exists:
                 header = [
@@ -269,17 +270,14 @@ class CoordinatesWriter:
                     'Latitude',
                     'Longitude'
                 ]
-                csv_writer.writerow(header)
+                self.writer.writerow(header, header=True)
                 logging.info(f"Created new CSV file: {self.csv_file_path}")
-                if self.rows is not None:
-                    self.headers = header
             else:
                 logging.info(f"Appending to existing CSV file: {self.csv_file_path}")
 
-            self.writer = _CSVProxyWriter(csv_writer, self)
             return self.writer
 
-        except Exception as e:
+        except (OSError, csv.Error) as e:
             logging.error(f"Failed to open CSV file: {e}")
             if self.file:
                 self.file.close()
@@ -322,17 +320,35 @@ class _CSVProxyWriter:
         self._csv_writer = csv_writer
         self._parent = parent
 
-    def writerow(self, row):
+    def writerow(self, row, *, header: bool = False):
+        """Write a single row and optionally record it as the header.
+
+        Args:
+            row: Iterable of values to write to the CSV file.
+            header: Set to True when the row represents column headers so that
+                auxiliary exports (e.g., KML/KMZ) can correctly map values.
+        """
+
         self._csv_writer.writerow(row)
         if self._parent.rows is not None:
-            if self._parent.headers is None:
+            if header:
+                self._parent.headers = list(row)
+            elif self._parent.headers is None:
+                logging.debug(
+                    "Assuming the first row written via CoordinatesWriter is a header. "
+                    "Pass header=True to writerow() to make this explicit."
+                )
                 self._parent.headers = list(row)
             else:
                 self._parent.rows.append(list(row))
 
-    def writerows(self, rows):
+    def writerows(self, rows, *, header: bool = False):
+        """Write multiple rows, optionally treating the first as the header."""
+
+        first = True
         for row in rows:
-            self.writerow(row)
+            self.writerow(row, header=header and first)
+            first = False
 
     def __getattr__(self, item):
         return getattr(self._csv_writer, item)
@@ -367,7 +383,7 @@ def save_to_csv(data, csv_file_path, headers=None):
         logging.info(f"Data saved to CSV file: {csv_file_path}")
         return True
 
-    except Exception as e:
+    except (OSError, csv.Error) as e:
         logging.error(f"Failed to write to CSV file: {e}")
         return False
 
@@ -393,7 +409,7 @@ def save_records_to_kml(records: List[Dict[str, object]], kml_file_path: str,
 
         logging.info(f"Data saved to KML file: {kml_file_path}")
         return True
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logging.error(f"Failed to write to KML file: {e}")
         return False
 
@@ -419,7 +435,7 @@ def save_records_to_kmz(records: List[Dict[str, object]], kmz_file_path: str,
 
         logging.info(f"Data saved to KMZ file: {kmz_file_path}")
         return True
-    except Exception as e:
+    except (OSError, ValueError, zipfile.BadZipFile) as e:
         logging.error(f"Failed to write to KMZ file: {e}")
         return False
 
