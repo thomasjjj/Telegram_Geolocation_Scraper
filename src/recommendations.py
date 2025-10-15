@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from telethon import TelegramClient
 from telethon.errors import RPCError
+from telethon.tl.functions.channels import GetChannelRecommendationsRequest
 from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
 from src.database import CoordinatesDatabase
@@ -27,6 +29,11 @@ class RecommendationSettings:
     show_at_startup: bool = True
     auto_enrich: bool = False
     max_display: int = 5
+    telegram_recs_enabled: bool = True
+    telegram_min_source_density: float = 5.0
+    telegram_auto_harvest: bool = False
+    telegram_harvest_after_scrape: bool = False
+    telegram_max_source_channels: Optional[int] = None
 
     @classmethod
     def from_environment(cls) -> "RecommendationSettings":
@@ -43,12 +50,35 @@ class RecommendationSettings:
         auto_enrich = _as_bool(os.environ.get("RECOMMENDATIONS_AUTO_ENRICH"), False)
         max_display = int(os.environ.get("RECOMMENDATIONS_MAX_DISPLAY", 5))
 
+        telegram_recs_enabled = _as_bool(os.environ.get("TELEGRAM_RECS_ENABLED"), True)
+        telegram_min_source_density = float(
+            os.environ.get("TELEGRAM_RECS_MIN_SOURCE_DENSITY", 5.0)
+        )
+        telegram_auto_harvest = _as_bool(
+            os.environ.get("TELEGRAM_RECS_AUTO_HARVEST"), False
+        )
+        telegram_harvest_after_scrape = _as_bool(
+            os.environ.get("TELEGRAM_RECS_HARVEST_AFTER_SCRAPE"), False
+        )
+        max_sources_value = os.environ.get("TELEGRAM_RECS_MAX_SOURCE_CHANNELS")
+        try:
+            telegram_max_source_channels = (
+                int(max_sources_value) if max_sources_value else None
+            )
+        except (TypeError, ValueError):
+            telegram_max_source_channels = None
+
         return cls(
             enabled=enabled,
             min_score=min_score,
             show_at_startup=show_at_startup,
             auto_enrich=auto_enrich,
             max_display=max_display,
+            telegram_recs_enabled=telegram_recs_enabled,
+            telegram_min_source_density=telegram_min_source_density,
+            telegram_auto_harvest=telegram_auto_harvest,
+            telegram_harvest_after_scrape=telegram_harvest_after_scrape,
+            telegram_max_source_channels=telegram_max_source_channels,
         )
 
 
@@ -143,6 +173,296 @@ class RecommendationManager:
 
         self._recalculate_score(source_channel_id)
         return created
+
+    # ------------------------------------------------------------------
+    # Telegram API recommendation harvesting
+    async def fetch_telegram_recommendations(
+        self,
+        client: TelegramClient,
+        channel_id: int,
+    ) -> List[Dict[str, Any]]:
+        """Fetch Telegram's native channel recommendations for *channel_id*."""
+
+        try:
+            entity = await client.get_entity(channel_id)
+        except (RPCError, ValueError) as exc:
+            LOGGER.warning("Unable to resolve entity for channel %s: %s", channel_id, exc)
+            return []
+
+        try:
+            result = await client(
+                GetChannelRecommendationsRequest(channel=entity)
+            )
+        except RPCError as exc:  # pragma: no cover - Telethon RPC errors are network driven
+            error_text = str(exc)
+            if "CHANNEL_INVALID" in error_text:
+                LOGGER.warning("Channel %s is invalid or inaccessible", channel_id)
+            elif "CHANNEL_PRIVATE" in error_text:
+                LOGGER.warning("Channel %s is private and cannot provide recommendations", channel_id)
+            else:
+                LOGGER.error(
+                    "Failed to fetch Telegram recommendations for channel %s: %s",
+                    channel_id,
+                    exc,
+                )
+            return []
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            LOGGER.error(
+                "Unexpected error fetching Telegram recommendations for channel %s: %s",
+                channel_id,
+                exc,
+            )
+            return []
+
+        recommendations: List[Dict[str, Any]] = []
+        for chat in getattr(result, "chats", []) or []:
+            if not hasattr(chat, "id"):
+                continue
+
+            recommendations.append(
+                {
+                    "channel_id": chat.id,
+                    "username": getattr(chat, "username", None),
+                    "title": getattr(chat, "title", None),
+                    "participants_count": getattr(chat, "participants_count", None),
+                    "verified": getattr(chat, "verified", False),
+                    "scam": getattr(chat, "scam", False),
+                    "fake": getattr(chat, "fake", False),
+                    "has_geo": getattr(chat, "has_geo", False),
+                    "restricted": getattr(chat, "restricted", False),
+                    "source_channel_id": channel_id,
+                }
+            )
+
+        LOGGER.info(
+            "Fetched %s Telegram recommendations for channel %s",
+            len(recommendations),
+            channel_id,
+        )
+        return recommendations
+
+    async def harvest_telegram_recommendations(
+        self,
+        client: TelegramClient,
+        min_coordinate_density: Optional[float] = None,
+        max_source_channels: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Harvest Telegram recommendations from high-quality coordinate sources."""
+
+        if not self.settings.enabled or not self.settings.telegram_recs_enabled:
+            LOGGER.warning("Telegram recommendation harvesting is disabled")
+            return {}
+
+        density_threshold = (
+            self.settings.telegram_min_source_density
+            if min_coordinate_density is None
+            else min_coordinate_density
+        )
+        channel_limit = (
+            self.settings.telegram_max_source_channels
+            if max_source_channels is None
+            else max_source_channels
+        )
+
+        source_channels = self.db.get_channels_with_coordinates(
+            min_density=density_threshold,
+            limit=channel_limit,
+        )
+
+        if not source_channels:
+            LOGGER.warning(
+                "No source channels found with coordinate density >= %.1f%%",
+                density_threshold,
+            )
+            return {
+                "source_channels_checked": 0,
+                "new_recommendations": 0,
+                "updated_recommendations": 0,
+                "total_telegram_suggestions": 0,
+                "already_tracked": 0,
+                "errors": 0,
+            }
+
+        print(
+            f"\n🔍 Harvesting Telegram recommendations from {len(source_channels)} high-quality channels..."
+        )
+        print(
+            f"   Using channels with coordinate density >= {density_threshold:.1f}%\n"
+        )
+
+        stats = {
+            "source_channels_checked": 0,
+            "new_recommendations": 0,
+            "updated_recommendations": 0,
+            "total_telegram_suggestions": 0,
+            "already_tracked": 0,
+            "errors": 0,
+        }
+
+        for idx, source_channel in enumerate(source_channels, 1):
+            channel_id = source_channel["id"]
+            channel_name = (
+                source_channel.get("title")
+                or source_channel.get("username")
+                or f"ID:{channel_id}"
+            )
+            density = float(source_channel.get("coordinate_density") or 0.0)
+
+            print(
+                f"[{idx}/{len(source_channels)}] Checking: {channel_name} (density: {density:.1f}%)..."
+            )
+
+            telegram_recs = await self.fetch_telegram_recommendations(client, channel_id)
+            stats["source_channels_checked"] += 1
+            stats["total_telegram_suggestions"] += len(telegram_recs)
+
+            if not telegram_recs:
+                print("   ⚠️  No recommendations available")
+                continue
+
+            print(f"   📥 Found {len(telegram_recs)} Telegram suggestions")
+
+            for rec in telegram_recs:
+                rec_channel_id = rec["channel_id"]
+
+                if self._is_already_followed(rec_channel_id):
+                    stats["already_tracked"] += 1
+                    continue
+
+                existing = self.db.get_recommended_channel(rec_channel_id)
+
+                try:
+                    if existing:
+                        self._update_telegram_recommendation(
+                            rec_channel_id,
+                            rec,
+                            channel_id,
+                            density,
+                        )
+                        stats["updated_recommendations"] += 1
+                    else:
+                        self._add_telegram_recommendation(
+                            rec,
+                            channel_id,
+                            density,
+                        )
+                        stats["new_recommendations"] += 1
+
+                        rec_name = (
+                            rec.get("title")
+                            or rec.get("username")
+                            or f"ID:{rec_channel_id}"
+                        )
+                        print(f"   ✨ New: {rec_name}")
+                except sqlite3.DatabaseError as exc:  # pragma: no cover - sqlite errors
+                    stats["errors"] += 1
+                    LOGGER.error(
+                        "Failed to process Telegram recommendation %s: %s",
+                        rec_channel_id,
+                        exc,
+                    )
+
+        print("\n" + "=" * 60)
+        print("✅ HARVEST COMPLETE")
+        print("=" * 60)
+        print(f"Source channels checked:     {stats['source_channels_checked']}")
+        print(f"Telegram suggestions found:  {stats['total_telegram_suggestions']}")
+        print(f"New recommendations:         {stats['new_recommendations']}")
+        print(f"Updated recommendations:     {stats['updated_recommendations']}")
+        print(f"Already tracked (skipped):   {stats['already_tracked']}")
+        if stats["errors"]:
+            print(f"Errors encountered:          {stats['errors']}")
+        print("=" * 60 + "\n")
+
+        LOGGER.info(
+            "Telegram recommendation harvest complete: checked=%s, new=%s, updated=%s",
+            stats["source_channels_checked"],
+            stats["new_recommendations"],
+            stats["updated_recommendations"],
+        )
+
+        return stats
+
+    def _add_telegram_recommendation(
+        self,
+        rec: Dict[str, Any],
+        source_channel_id: int,
+        source_density: float,
+    ) -> None:
+        """Create a recommendation entry for a Telegram API discovery."""
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        payload = {
+            "username": rec.get("username"),
+            "title": rec.get("title"),
+            "channel_type": "channel",
+            "first_seen": now_iso,
+            "last_seen": now_iso,
+            "discovered_from_channels": json.dumps([source_channel_id]),
+            "discovery_method": "telegram_api",
+            "forward_count": 0,
+            "coordinate_forward_count": 0,
+            "telegram_recommendation_count": 1,
+            "telegram_rec_source_density": float(source_density),
+            "user_status": "pending",
+            "subscriber_count": rec.get("participants_count"),
+            "is_verified": rec.get("verified", False),
+            "is_scam": rec.get("scam", False),
+            "is_fake": rec.get("fake", False),
+            "is_accessible": not rec.get("restricted", False),
+            "last_harvest_date": now_iso,
+        }
+
+        self.db.add_recommended_channel(rec["channel_id"], payload)
+        self._recalculate_score(rec["channel_id"])
+        self.db.add_recommendation_event(
+            rec["channel_id"],
+            "discovered_telegram_api",
+            {
+                "source_channel": source_channel_id,
+                "source_density": source_density,
+                "telegram_metadata": rec,
+            },
+        )
+
+    def _update_telegram_recommendation(
+        self,
+        rec_channel_id: int,
+        rec: Dict[str, Any],
+        source_channel_id: int,
+        source_density: float,
+    ) -> None:
+        """Update an existing recommendation with Telegram API metadata."""
+
+        existing = self.db.get_recommended_channel(rec_channel_id)
+        if not existing:
+            return
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        sources = self._merge_sources(existing, source_channel_id)
+
+        telegram_count = int(existing.get("telegram_recommendation_count", 0) or 0) + 1
+        old_avg = float(existing.get("telegram_rec_source_density", 0.0) or 0.0)
+        new_avg = ((old_avg * (telegram_count - 1)) + float(source_density)) / telegram_count
+
+        update_data: Dict[str, Any] = {
+            "last_seen": now_iso,
+            "discovered_from_channels": json.dumps(sources),
+            "telegram_recommendation_count": telegram_count,
+            "telegram_rec_source_density": new_avg,
+            "last_harvest_date": now_iso,
+        }
+
+        if not existing.get("title") and rec.get("title"):
+            update_data["title"] = rec["title"]
+        if not existing.get("username") and rec.get("username"):
+            update_data["username"] = rec["username"]
+        if not existing.get("subscriber_count") and rec.get("participants_count"):
+            update_data["subscriber_count"] = rec["participants_count"]
+
+        self.db.update_recommended_channel(rec_channel_id, update_data)
+        self._recalculate_score(rec_channel_id)
 
     # ------------------------------------------------------------------
     # Recommendation retrieval helpers
@@ -365,6 +685,22 @@ class RecommendationManager:
             hit_rate = coordinate_forward_count / forward_count
             score += hit_rate * 25.0
 
+        telegram_rec_count = int(channel_data.get("telegram_recommendation_count", 0) or 0)
+        if telegram_rec_count > 0:
+            score += min(20.0, telegram_rec_count * 4.0)
+
+            avg_source_density = float(channel_data.get("telegram_rec_source_density", 0.0) or 0.0)
+            if avg_source_density > 10.0:
+                score += 15.0
+            elif avg_source_density > 5.0:
+                score += 10.0
+            elif avg_source_density > 0.0:
+                score += 5.0
+
+        discovery_method = channel_data.get("discovery_method")
+        if discovery_method == "telegram_api":
+            score += 5.0
+
         source_count = 0
         sources_raw = channel_data.get("discovered_from_channels")
         if sources_raw:
@@ -377,7 +713,7 @@ class RecommendationManager:
                 sources_list = sources_raw
             if isinstance(sources_list, (list, tuple, set)):
                 source_count = len({int(item) for item in sources_list if isinstance(item, int)})
-        score += min(20.0, source_count * 4.0)
+        score += min(15.0, source_count * 3.0)
 
         last_seen_value = channel_data.get("last_seen")
         if last_seen_value:
