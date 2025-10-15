@@ -71,6 +71,12 @@ async def scrape_channel(
     try:
         entity = await client.get_entity(channel_id)
         resolved_channel_id = getattr(entity, "id", channel_id)
+        channel_display_name = (
+            getattr(entity, "title", None)
+            or getattr(entity, "name", None)
+            or getattr(entity, "username", None)
+            or str(resolved_channel_id)
+        )
         stats.channel_id = resolved_channel_id
 
         latest_message_id: Optional[int] = None
@@ -175,7 +181,7 @@ async def scrape_channel(
                         lat_value,
                         lon_value,
                         message.id,
-                        resolved_channel_id,
+                        channel_display_name,
                     )
 
                     if database and row_id:
