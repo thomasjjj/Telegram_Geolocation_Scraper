@@ -58,17 +58,30 @@ DEFAULT_GEO_KEYWORDS = [
 MAIN_MENU = """
 === Telegram Coordinates Scraper ===
 
-Choose an option:
-1. Search a specific channel/group
-2. Search all accessible chats
-3. Process a JSON export file
-4. Scan all known channels with coordinates
-5. View database statistics
-6. Manage database
-7. Manage recommended channels
-8. Exit
+1. Quick Scrape (recommended)
+   → Enter channel(s) and start immediately
+   
+2. Advanced Options
+   → Database management, recommendations, JSON import
+   
+3. View Results & Statistics
 
-Enter your choice (1-8): """
+4. Exit
+
+Enter choice (1-4): """
+
+
+ADVANCED_MENU = """
+=== Advanced Options ===
+
+1. Search all accessible chats
+2. Process a JSON export file
+3. Scan all known channels with coordinates
+4. Manage database
+5. Manage recommended channels
+6. Back to main menu
+
+Enter choice (1-6): """
 
 
 def configure_logging() -> None:
@@ -1026,6 +1039,37 @@ Enter choice: """
             print("Invalid choice. Please try again.")
 
 
+def handle_advanced_options(
+    database: Optional[CoordinatesDatabase],
+    db_config: dict,
+    api_id: int,
+    api_hash: str,
+    recommendation_manager: Optional[RecommendationManager],
+) -> None:
+    while True:
+        choice = input(ADVANCED_MENU).strip()
+        if choice == "1":
+            handle_search_all_chats(database, db_config, api_id, api_hash, recommendation_manager)
+        elif choice == "2":
+            handle_process_json(database)
+        elif choice == "3":
+            handle_scan_known_channels(database, db_config, api_id, api_hash, recommendation_manager)
+        elif choice == "4":
+            handle_database_management(database)
+        elif choice == "5":
+            handle_recommendation_management(
+                recommendation_manager,
+                database,
+                db_config,
+                api_id,
+                api_hash,
+            )
+        elif choice == "6":
+            break
+        else:
+            print("Invalid selection. Please choose an option from 1 to 6.")
+
+
 def main() -> None:
     configure_logging()
     env_path = Path(__file__).resolve().parent / ".env"
@@ -1052,28 +1096,14 @@ def main() -> None:
         if choice == "1":
             handle_specific_channel(database, db_config, api_id, api_hash, recommendation_manager)
         elif choice == "2":
-            handle_search_all_chats(database, db_config, api_id, api_hash, recommendation_manager)
+            handle_advanced_options(database, db_config, api_id, api_hash, recommendation_manager)
         elif choice == "3":
-            handle_process_json(database)
-        elif choice == "4":
-            handle_scan_known_channels(database, db_config, api_id, api_hash, recommendation_manager)
-        elif choice == "5":
             handle_database_statistics(database)
-        elif choice == "6":
-            handle_database_management(database)
-        elif choice == "7":
-            handle_recommendation_management(
-                recommendation_manager,
-                database,
-                db_config,
-                api_id,
-                api_hash,
-            )
-        elif choice == "8":
+        elif choice == "4":
             print("Goodbye!")
             break
         else:
-            print("Invalid selection. Please choose an option from 1 to 8.")
+            print("Invalid selection. Please choose an option from 1 to 4.")
 
 
 if __name__ == "__main__":  # pragma: no cover - interactive entry point
