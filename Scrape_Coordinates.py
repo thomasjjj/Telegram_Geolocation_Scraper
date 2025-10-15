@@ -134,7 +134,9 @@ def get_database_configuration(config: Config) -> dict:
     }
 
 
-def get_default_session_name(config: Config) -> str:
+def get_default_session_name(config: Optional[Config] = None) -> str:
+    if config is None:
+        config = Config()
     return config.session_name
 
 
@@ -170,15 +172,21 @@ def prompt_with_smart_default(
     return response
 
 
-def prompt_session_name(prompt: str = "Enter Telegram session name to use") -> str:
-    default_session = get_default_session_name()
+def prompt_session_name(
+    prompt: str = "Enter Telegram session name to use",
+    *,
+    config: Optional[Config] = None,
+    env_path: Optional[Path] = None,
+) -> str:
+    default_session = get_default_session_name(config)
     session_name = prompt_with_smart_default(
         prompt,
         default_session,
         validator=lambda value: bool(value.strip()),
     )
     os.environ["TELEGRAM_SESSION_NAME"] = session_name
-    set_key(str(env_path), "TELEGRAM_SESSION_NAME", session_name)
+    if env_path is not None:
+        set_key(str(env_path), "TELEGRAM_SESSION_NAME", session_name)
     return session_name
 
 
@@ -206,6 +214,34 @@ async def ensure_telegram_authentication(api_id: int, api_hash: str, session_nam
             print("Authentication successful.")
     finally:
         await client.disconnect()
+
+
+def first_time_setup(config: Config) -> bool:
+    session_name = config.session_name or os.getenv("TELEGRAM_SESSION_NAME", "scraper")
+    session_file = Path(f"{session_name}.session")
+    credentials_missing = not (config.api_id and config.api_hash)
+    return credentials_missing or not session_file.exists()
+
+
+def setup_wizard(env_path: Path, config: Config) -> tuple[int, str, str]:
+    print("Step 1/3: Add your Telegram API credentials.")
+    api_id, api_hash = ensure_api_credentials(env_path, config)
+
+    refreshed_config = Config(env_path)
+
+    print("\nStep 2/3: Choose a name for your session file.")
+    session_name = prompt_session_name(
+        "Enter a session name",
+        config=refreshed_config,
+        env_path=env_path,
+    )
+
+    print("\nStep 3/3: Sign in to Telegram so we can verify access.")
+    asyncio.run(ensure_telegram_authentication(api_id, api_hash, session_name))
+
+    print("\n🎉 Setup complete! You're ready to start scraping.\n")
+
+    return api_id, api_hash, session_name
 
 
 async def _search_dialogs_for_keywords(
@@ -458,8 +494,10 @@ def handle_specific_channel(
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
+    config: Config,
+    env_path: Path,
 ) -> None:
-    session_name = prompt_session_name("Enter the session name")
+    session_name = prompt_session_name("Enter the session name", config=config, env_path=env_path)
     channels = prompt_channel_selection(database, recommendation_manager)
     date_limit = prompt_date_limit()
 
@@ -484,8 +522,10 @@ def handle_search_all_chats(
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
+    config: Config,
+    env_path: Path,
 ) -> None:
-    session_name = prompt_session_name("Enter the session name")
+    session_name = prompt_session_name("Enter the session name", config=config, env_path=env_path)
     results = asyncio.run(
         _search_dialogs_for_keywords(api_id=api_id, api_hash=api_hash, session_name=session_name, keywords=DEFAULT_GEO_KEYWORDS)
     )
@@ -1131,11 +1171,21 @@ def handle_advanced_options(
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
+    config: Config,
+    env_path: Path,
 ) -> None:
     while True:
         choice = input(ADVANCED_MENU).strip()
         if choice == "1":
-            handle_search_all_chats(database, db_config, api_id, api_hash, recommendation_manager)
+            handle_search_all_chats(
+                database,
+                db_config,
+                api_id,
+                api_hash,
+                recommendation_manager,
+                config,
+                env_path,
+            )
         elif choice == "2":
             handle_process_json(database)
         elif choice == "3":
@@ -1160,10 +1210,20 @@ def main() -> None:
     configure_logging()
     env_path = Path(__file__).resolve().parent / ".env"
     config = load_environment(env_path)
-    api_id, api_hash = ensure_api_credentials(env_path, config)
+    first_run = first_time_setup(config)
 
-    session_name = prompt_session_name(config, env_path)
-    asyncio.run(ensure_telegram_authentication(api_id, api_hash, session_name))
+    if first_run:
+        print("👋 Welcome! Let's get you set up in 3 steps...\n")
+        api_id, api_hash, session_name = setup_wizard(env_path, config)
+        config = load_environment(env_path)
+        authenticated = True
+    else:
+        api_id, api_hash = ensure_api_credentials(env_path, config)
+        session_name = prompt_session_name(config=config, env_path=env_path)
+        authenticated = False
+
+    if not authenticated:
+        asyncio.run(ensure_telegram_authentication(api_id, api_hash, session_name))
 
     db_config = get_database_configuration(config)
     database = CoordinatesDatabase(db_config["path"]) if db_config["enabled"] else None
@@ -1180,9 +1240,25 @@ def main() -> None:
     while True:
         choice = input(MAIN_MENU).strip()
         if choice == "1":
-            handle_specific_channel(database, db_config, api_id, api_hash, recommendation_manager)
+            handle_specific_channel(
+                database,
+                db_config,
+                api_id,
+                api_hash,
+                recommendation_manager,
+                config,
+                env_path,
+            )
         elif choice == "2":
-            handle_advanced_options(database, db_config, api_id, api_hash, recommendation_manager)
+            handle_advanced_options(
+                database,
+                db_config,
+                api_id,
+                api_hash,
+                recommendation_manager,
+                config,
+                env_path,
+            )
         elif choice == "3":
             handle_database_statistics(database)
         elif choice == "4":
