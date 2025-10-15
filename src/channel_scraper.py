@@ -167,6 +167,14 @@ async def scrape_channel(
                     longitudes.append(lon_value)
                     stats.coordinates_found += 1
 
+                    LOGGER.info(
+                        "Retrieved coordinate (%s, %s) from message %s in channel %s",
+                        lat_value,
+                        lon_value,
+                        message.id,
+                        resolved_channel_id,
+                    )
+
                     if database and row_id:
                         database.add_coordinate(
                             row_id,
