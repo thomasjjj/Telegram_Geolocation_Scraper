@@ -161,11 +161,8 @@ async def _search_dialogs_for_keywords(
     return results
 
 
-def prompt_channel_selection(api_id: int, api_hash: str, session_name: str) -> List[str]:
-    prompt = (
-        "Enter Telegram channel usernames or IDs (comma separated) "
-        "or type 'SEARCH' to scan joined chats for geolocation keywords: "
-    )
+def prompt_channel_selection() -> List[str]:
+    prompt = "Enter Telegram channel usernames or IDs (comma separated): "
 
     channels: List[str] = []
 
@@ -173,72 +170,10 @@ def prompt_channel_selection(api_id: int, api_hash: str, session_name: str) -> L
         channels_input = input(prompt).strip()
 
         if not channels_input:
-            print("At least one channel is required or type 'SEARCH' to run the keyword scan.")
+            print("At least one channel is required.")
             continue
 
-        if channels_input.upper() == "SEARCH":
-            print("Searching your joined chats and channels for geolocation keywords...")
-            try:
-                search_results = asyncio.run(
-                    _search_dialogs_for_keywords(
-                        api_id=api_id,
-                        api_hash=api_hash,
-                        session_name=session_name,
-                        keywords=DEFAULT_GEO_KEYWORDS,
-                    )
-                )
-            except Exception as exc:  # pragma: no cover - telethon specific errors
-                logging.error("Failed to search joined chats: %s", exc)
-                continue
-
-            if not search_results:
-                print("No matching chats or channels were found. Try again or enter channel names manually.")
-                continue
-
-            print("Found the following chats/channels with geolocation-related keywords:")
-            for idx, result in enumerate(search_results, start=1):
-                entity = result["entity"]
-                username = getattr(entity, "username", None)
-                dialog_name = result["dialog"].name or username or str(entity.id)
-                identifier = f"@{username}" if username else f"ID {entity.id}"
-                keyword = result["keyword"]
-                excerpt = result["excerpt"] or "(no preview available)"
-                print(f"  [{idx}] {dialog_name} ({identifier}) - matched '{keyword}': {excerpt}")
-
-            selection = input(
-                "Enter the numbers of the chats you want to scrape (comma separated, press Enter to select all): "
-            ).strip()
-
-            if not selection:
-                channels = [str(result["entity"].id) for result in search_results]
-                break
-
-            chosen_indices: List[int] = []
-            for item in selection.split(","):
-                item = item.strip()
-                if not item:
-                    continue
-                if not item.isdigit():
-                    print(f"Ignoring invalid selection '{item}'. Please enter numeric choices.")
-                    chosen_indices = []
-                    break
-                chosen_indices.append(int(item))
-
-            if not chosen_indices:
-                continue
-
-            invalid_choices = [idx for idx in chosen_indices if idx < 1 or idx > len(search_results)]
-            if invalid_choices:
-                print(f"Invalid selection numbers: {', '.join(map(str, invalid_choices))}. Please try again.")
-                continue
-
-            channels = []
-            for idx in chosen_indices:
-                entity = search_results[idx - 1]["entity"]
-                username = getattr(entity, "username", None)
-                channels.append(username or str(entity.id))
-        else:
-            channels = [channel.strip() for channel in channels_input.split(",") if channel.strip()]
+        channels = [channel.strip() for channel in channels_input.split(",") if channel.strip()]
 
         if not channels:
             print("No valid channels selected. Please try again.")
@@ -256,36 +191,6 @@ def prompt_date_limit() -> Optional[str]:
             return date_limit_input
         except ValueError:
             print("Invalid date format. Please use YYYY-MM-DD.")
-
-
-def prompt_output_paths() -> tuple[str, Optional[str], Optional[str]]:
-    output_path = input("Enter the output CSV path: ").strip()
-    while not output_path:
-        print("Output path cannot be empty.")
-        output_path = input("Enter the output CSV path: ").strip()
-
-    export_kml = input("Export to KML as well? (y/N): ").strip().lower() == "y"
-    kml_output_path = None
-    if export_kml:
-        custom_kml_path = input("Enter KML output path (press Enter to use CSV path with .kml): ").strip()
-        kml_output_path = custom_kml_path or _derive_output_path(output_path, ".kml")
-
-    export_kmz = input("Export to KMZ as well? (y/N): ").strip().lower() == "y"
-    kmz_output_path = None
-    if export_kmz:
-        custom_kmz_path = input("Enter KMZ output path (press Enter to use CSV path with .kmz): ").strip()
-        kmz_output_path = custom_kmz_path or _derive_output_path(output_path, ".kmz")
-
-    return output_path, kml_output_path, kmz_output_path
-
-
-def _derive_output_path(base_path: str, new_extension: str) -> str:
-    base, ext = os.path.splitext(base_path)
-    if not base:
-        return base_path + new_extension
-    if ext.lower() == new_extension.lower():
-        return base_path
-    return base + new_extension
 
 
 def _decode_sources(record: Dict[str, Any]) -> List[int]:
@@ -408,19 +313,16 @@ def handle_specific_channel(
     recommendation_manager: Optional[RecommendationManager],
 ) -> None:
     session_name = input("Enter the session name (press Enter for default 'simple_scraper'): ").strip() or "simple_scraper"
-    channels = prompt_channel_selection(api_id, api_hash, session_name)
+    channels = prompt_channel_selection()
     date_limit = prompt_date_limit()
-    output_path, kml_output, kmz_output = prompt_output_paths()
 
     channel_scraper(
         channel_links=channels,
         date_limit=date_limit,
-        output_path=output_path,
+        output_path=None,
         api_id=api_id,
         api_hash=api_hash,
         session_name=session_name,
-        kml_output_path=kml_output,
-        kmz_output_path=kmz_output,
         use_database=db_config["enabled"] and database is not None,
         skip_existing=db_config.get("skip_existing", True),
         db_path=db_config.get("path"),
@@ -473,16 +375,13 @@ def handle_search_all_chats(
         print("No valid channels selected.")
         return
 
-    output_path, kml_output, kmz_output = prompt_output_paths()
     channel_scraper(
         channel_links=channels,
         date_limit=None,
-        output_path=output_path,
+        output_path=None,
         api_id=api_id,
         api_hash=api_hash,
         session_name=session_name,
-        kml_output_path=kml_output,
-        kmz_output_path=kmz_output,
         use_database=db_config["enabled"] and database is not None,
         skip_existing=db_config.get("skip_existing", True),
         db_path=db_config.get("path"),
@@ -573,17 +472,12 @@ def _run_recommended_scrape(
         print("Cancelled.")
         return
 
-    output_default = os.path.join(
-        "results",
-        f"recommended_channels_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv",
-    )
-    output_path = input(f"Enter output CSV path (default {output_default}): ").strip() or output_default
     date_limit = input("Enter date limit (YYYY-MM-DD, or press Enter for no limit): ").strip() or None
 
     channel_scraper(
         channel_links=identifiers,
         date_limit=date_limit,
-        output_path=output_path,
+        output_path=None,
         api_id=api_id,
         api_hash=api_hash,
         session_name="recommended_scrape",
@@ -598,10 +492,10 @@ def _run_recommended_scrape(
         recommendation_manager.mark_recommendation_status(
             recommendation["channel_id"],
             "scraped",
-            notes=f"Scraped to {output_path}",
+            notes="Scraped without on-demand CSV export",
         )
 
-    print(f"\n✅ Scraping complete! Results saved to: {output_path}")
+    print("\n✅ Scraping complete! Review new data through the database management menu.")
 
 
 def handle_recommendation_management(
@@ -940,13 +834,11 @@ def handle_scan_known_channels(
         return
 
     identifiers = [channel.get("username") or channel["id"] for channel in selected]
-    output_name = datetime.datetime.utcnow().strftime("scan_known_channels_%Y%m%d_%H%M%S.csv")
-    output_path = os.path.join("results", output_name)
 
     channel_scraper(
         channel_links=identifiers,
         date_limit=None,
-        output_path=output_path,
+        output_path=None,
         api_id=api_id,
         api_hash=api_hash,
         session_name="database_scan",
@@ -957,7 +849,7 @@ def handle_scan_known_channels(
         recommendation_manager=recommendation_manager,
     )
 
-    print(f"Scan complete. Results stored in {output_path}")
+    print("Scan complete. Updated data is available in the database.")
 
 
 def handle_database_statistics(database: Optional[CoordinatesDatabase]) -> None:

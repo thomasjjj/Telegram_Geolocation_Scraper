@@ -231,7 +231,7 @@ def _ensure_sequence(value: Sequence[str] | str) -> Sequence[str]:
 def channel_scraper(
     channel_links: Sequence[str] | str,
     date_limit: Optional[str],
-    output_path: str,
+    output_path: str | None = None,
     api_id: Optional[int] = None,
     api_hash: Optional[str] = None,
     session_name: str = "simple_scraper",
@@ -243,7 +243,12 @@ def channel_scraper(
     database: Optional[CoordinatesDatabase] = None,
     recommendation_manager: "RecommendationManager" | None = None,
 ) -> pd.DataFrame:
-    """Scrape Telegram channels for coordinates and save the results."""
+    """Scrape Telegram channels for coordinates and optionally export the results.
+
+    When *output_path* is provided the collected coordinates are written to that
+    CSV file. Otherwise the information is only persisted to the configured
+    database (if enabled).
+    """
 
     parsed_date_limit: Optional[datetime.datetime] = None
     if date_limit:
@@ -353,9 +358,10 @@ def channel_scraper(
     )
 
     if not df.empty:
-        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        df.to_csv(output_path, index=False)
-        LOGGER.info("Successfully saved %s coordinates to %s", len(df), output_path)
+        if output_path:
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+            df.to_csv(output_path, index=False)
+            LOGGER.info("Successfully saved %s coordinates to %s", len(df), output_path)
 
         if kml_output_path:
             if save_dataframe_to_kml(df, kml_output_path):
@@ -364,6 +370,8 @@ def channel_scraper(
         if kmz_output_path:
             if save_dataframe_to_kmz(df, kmz_output_path):
                 LOGGER.info("Successfully saved KMZ to %s", kmz_output_path)
+        if not output_path and not (kml_output_path or kmz_output_path):
+            LOGGER.info("Collected %s coordinates (no export paths provided)", len(df))
     else:
         LOGGER.info("No coordinates found.")
 
