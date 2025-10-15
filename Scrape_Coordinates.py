@@ -10,9 +10,10 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from dotenv import load_dotenv, set_key
+from colorama import Fore, Style, init as colorama_init
 
 from src.channel_scraper import channel_scraper
 from src.database import CoordinatesDatabase
@@ -53,6 +54,9 @@ DEFAULT_GEO_KEYWORDS = [
     "координати",
     "координатах",
 ]
+
+
+colorama_init(autoreset=True)
 
 
 MAIN_MENU = """
@@ -117,10 +121,44 @@ def get_default_session_name() -> str:
     return os.environ.get("TELEGRAM_SESSION_NAME", "simple_scraper")
 
 
-def prompt_session_name() -> str:
+def prompt_with_smart_default(
+    prompt: str,
+    default: str,
+    validator: Optional[Callable[[str], bool]] = None,
+) -> str:
+    """Prompt the user highlighting an auto-detected default value.
+
+    Parameters
+    ----------
+    prompt:
+        The user-facing text to display.
+    default:
+        The fallback value that is highlighted and returned when the user
+        provides an empty response or fails validation.
+    validator:
+        Optional callable that receives the raw user input. If it returns
+        ``False`` the default value is used instead.
+    """
+
+    separator = " " if prompt.rstrip().endswith(":") else ": "
+    default_hint = f" [{Fore.GREEN}{default}{Style.RESET_ALL}]" if default else ""
+    response = input(f"{prompt}{default_hint}{separator}").strip()
+    if not response:
+        return default
+
+    if validator and not validator(response):
+        print(f"{Fore.RED}Invalid input. Using default.{Style.RESET_ALL}")
+        return default
+
+    return response
+
+
+def prompt_session_name(prompt: str = "Enter Telegram session name to use") -> str:
     default_session = get_default_session_name()
-    session_name = (
-        input(f"Enter Telegram session name to use [{default_session}]: ").strip() or default_session
+    session_name = prompt_with_smart_default(
+        prompt,
+        default_session,
+        validator=lambda value: bool(value.strip()),
     )
     os.environ["TELEGRAM_SESSION_NAME"] = session_name
     return session_name
@@ -201,24 +239,75 @@ async def _search_dialogs_for_keywords(
     return results
 
 
-def prompt_channel_selection() -> List[str]:
-    prompt = "Enter Telegram channel usernames or IDs (comma separated): "
+def _parse_channel_list(raw_value: str) -> List[str]:
+    return [channel.strip() for channel in raw_value.split(",") if channel.strip()]
 
-    channels: List[str] = []
 
-    while not channels:
-        channels_input = input(prompt).strip()
+def _suggest_channels(
+    database: Optional[CoordinatesDatabase],
+    recommendation_manager: Optional[RecommendationManager],
+    limit: int = 3,
+) -> Tuple[List[str], Optional[str]]:
+    suggestions: List[str] = []
+    suggestion_source: Optional[str] = None
 
-        if not channels_input:
-            print("At least one channel is required.")
-            continue
+    if recommendation_manager:
+        for recommendation in recommendation_manager.get_top_recommendations(limit=limit):
+            identifier = recommendation.get("username") or recommendation.get("channel_id")
+            if not identifier:
+                continue
+            identifier_str = str(identifier)
+            if identifier_str not in suggestions:
+                suggestions.append(identifier_str)
+        if suggestions:
+            suggestion_source = "pending recommendations"
 
-        channels = [channel.strip() for channel in channels_input.split(",") if channel.strip()]
+    if database and len(suggestions) < limit:
+        for channel in database.get_channels_with_coordinates(limit=limit):
+            identifier = channel.get("username") or channel.get("id")
+            if not identifier:
+                continue
+            identifier_str = str(identifier)
+            if identifier_str not in suggestions:
+                suggestions.append(identifier_str)
+            if len(suggestions) >= limit:
+                break
+        if suggestions and suggestion_source is None:
+            suggestion_source = "previously scraped channels"
 
-        if not channels:
-            print("No valid channels selected. Please try again.")
+    return suggestions[:limit], suggestion_source
 
-    return channels
+
+def prompt_channel_selection(
+    database: Optional[CoordinatesDatabase],
+    recommendation_manager: Optional[RecommendationManager],
+) -> List[str]:
+    prompt = "Enter Telegram channel usernames or IDs (comma separated)"
+    suggestions, source = _suggest_channels(database, recommendation_manager)
+
+    if suggestions and source:
+        print(
+            f"Suggested {source}: {', '.join(suggestions)}"
+        )
+
+    while True:
+        if suggestions:
+            channels_input = prompt_with_smart_default(
+                prompt,
+                ", ".join(suggestions),
+                validator=lambda value: bool(_parse_channel_list(value)),
+            )
+        else:
+            channels_input = input(f"{prompt}: ").strip()
+            if not channels_input:
+                print("At least one channel is required.")
+                continue
+
+        channels = _parse_channel_list(channels_input)
+        if channels:
+            return channels
+
+        print("No valid channels selected. Please try again.")
 
 
 def prompt_date_limit() -> Optional[str]:
@@ -352,12 +441,8 @@ def handle_specific_channel(
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
 ) -> None:
-    default_session = get_default_session_name()
-    session_name = (
-        input(f"Enter the session name (press Enter for default '{default_session}'): ").strip()
-        or default_session
-    )
-    channels = prompt_channel_selection()
+    session_name = prompt_session_name("Enter the session name")
+    channels = prompt_channel_selection(database, recommendation_manager)
     date_limit = prompt_date_limit()
 
     channel_scraper(
@@ -382,11 +467,7 @@ def handle_search_all_chats(
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
 ) -> None:
-    default_session = get_default_session_name()
-    session_name = (
-        input(f"Enter the session name (press Enter for default '{default_session}'): ").strip()
-        or default_session
-    )
+    session_name = prompt_session_name("Enter the session name")
     results = asyncio.run(
         _search_dialogs_for_keywords(api_id=api_id, api_hash=api_hash, session_name=session_name, keywords=DEFAULT_GEO_KEYWORDS)
     )
