@@ -2,468 +2,304 @@
 
 ## Overview
 
-This Python package extracts geographical coordinates from Telegram messages, supporting both decimal and DMS (Degrees, Minutes, Seconds) formats. It uses the [Telethon](https://github.com/LonamiWebs/Telethon) library to search through Telegram channels, groups, and chats, and can also process exported JSON chat histories.
+Telegram Coordinates Scraper is a Python toolkit for locating geographical
+coordinates in Telegram content. It combines an interactive CLI, reusable
+library functions, and optional visualisation helpers to scan live chats or
+offline exports for latitude/longitude pairs. Behind the scenes the project uses
+[Telethon](https://github.com/LonamiWebs/Telethon) to talk to the Telegram API
+and persists results to CSV, SQLite, KML/KMZ, and Kepler.gl outputs for further
+analysis.
 
-![image](https://github.com/user-attachments/assets/f3d4b32e-f3b6-413c-bc7d-ea90cc8367fc)
+![Telegram coordinates workflow illustration](https://github.com/user-attachments/assets/f3d4b32e-f3b6-413c-bc7d-ea90cc8367fc)
+
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+  - [Interactive CLI](#interactive-cli)
+  - [Programmatic scraping](#programmatic-scraping)
+  - [Processing Telegram JSON exports](#processing-telegram-json-exports)
+- [Output formats](#output-formats)
+- [Visualising results](#visualising-results)
+- [Recommendation system](#recommendation-system)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
 
 ## Features
 
-- **Multiple Search Methods**:
-  - Search specific Telegram channels or groups by username/ID
-  - Search across all accessible Telegram chats
-  - Process offline JSON exports from Telegram
+### Search & discovery
 
-- **Coordinate Detection**:
-  - Supports decimal format (e.g., `51.5074, -0.1278`)
-  - Supports DMS format (e.g., `51° 30' 26" N, 0° 7' 40" W`)
-  - Multilingual search terms (English, Ukrainian, Russian)
+- Guided setup wizard stores API credentials and Telethon session files for you.
+- Quick Scrape mode lets you paste one or more channel links and start scraping
+  immediately.
+- Advanced options expose tooling to migrate historical CSVs, manage the
+  database, harvest Telegram's channel recommendations, and launch the Kepler.gl
+  visualiser.
+- Global search scans every accessible chat for keyword matches and prints
+  real-time progress.
 
-- **Comprehensive Results**:
-  - Message metadata (ID, date, text, source)
-  - Direct links to the original messages
-  - Latitude and longitude in decimal format
-  - CSV export for easy analysis
-  - Optional KML/KMZ export for direct use in Google Earth and GIS tools
-  - Interactive Kepler.gl maps (points, heatmaps, clusters, 3D hexagons, temporal playback)
+### Coordinate detection
 
-- **Configuration Options**:
-  - Environment variables
-  - Config files
-  - Command-line arguments
-  - Interactive prompts
+- Extracts decimal coordinates (e.g. `51.5074, -0.1278`) and DMS expressions.
+- Includes English, Ukrainian, and Russian keywords out of the box; customise
+  search terms through environment variables.
+- Deduplicates messages using the SQLite database and optional batching.
+
+### Data products & enrichment
+
+- Streams results to CSV (or a SQLite database) to keep memory usage low.
+- Optional KML/KMZ export integrates directly with Google Earth and GIS tools.
+- Integrates with Kepler.gl to build interactive HTML maps (points, heatmaps,
+  clusters, 3D hexagons, and temporal playback).
+- Manages a scored queue of recommended channels sourced from forwards and the
+  Telegram API.
 
 ## Requirements
 
-- Python 3.8+
-- Telegram API credentials (API ID and Hash)
-- Dependencies:
-  - telethon>=1.24.0
-  - pandas>=1.3.0
-  - python-dotenv>=0.21.0
-  - keplergl>=0.3.2 (interactive visualisation)
-  - jupyter>=1.0.0 (Kepler.gl HTML export support)
+- Python 3.8 or newer.
+- Telegram API credentials (API ID and API Hash) from
+  [my.telegram.org](https://my.telegram.org/).
+- Dependencies listed in `requirements.txt`:
+  `telethon`, `pandas`, `python-dotenv`, `colorama`, and optional
+  visualisation extras (`keplergl`, `jupyter`).
 
 ## Installation
 
-- **(Optional) Create a virtual environment**:
+1. **(Optional) Create and activate a virtual environment**
+
    ```bash
    python -m venv .venv
-   source .venv/bin/activate  # On Windows use: .venv\\Scripts\\activate
+   source .venv/bin/activate  # Windows: .venv\Scripts\activate
    ```
 
-1. **Clone the repository**:
+2. **Clone the repository and install dependencies**
+
    ```bash
    git clone https://github.com/<your-username>/Telegram_Geolocation_Scraper.git
    cd Telegram_Geolocation_Scraper
+   python -m pip install -r requirements.txt
    ```
 
-2. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+3. **Provide Telegram API credentials**
 
-3. **Configure Telegram API credentials**:
+   Copy the sample file and update the placeholders:
 
-   Copy the provided template and fill in your values:
    ```bash
    cp example_credentials.env .env
    ```
 
-   Create a `.env` file with your Telegram API credentials:
-   ```
+   Edit `.env` and set at least the following values:
+
+   ```dotenv
    TELEGRAM_API_ID=your_api_id
    TELEGRAM_API_HASH=your_api_hash
    TELEGRAM_SESSION_NAME=coordinates_scraper_session
    ```
 
-   You can get your API credentials from [my.telegram.org](https://my.telegram.org/):
-   1. Log in with your phone number
-   2. Go to 'API development tools'
-   3. Create a new application
-   4. Copy the API ID and API Hash
+   Run the CLI once to trigger the setup wizard if a session file has not been
+   created yet.
+
+## Configuration
+
+Most settings are driven by environment variables. The `.env` file is loaded
+with [python-dotenv](https://saurabh-kumar.com/python-dotenv/), so any value you
+add there is available to the CLI and library components.
+
+### Core settings
+
+| Variable | Description |
+| --- | --- |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Required Telegram API credentials. |
+| `TELEGRAM_SESSION_NAME` | Name of the Telethon session file that stores your login. |
+| `TELEGRAM_SEARCH_TERMS` | Comma-separated keywords for the "Search all accessible chats" workflow. |
+| `TELEGRAM_COORDINATES_CSV_FILE` | Default filename for CSV exports (`coordinates_results.csv`). |
+| `TELEGRAM_COORDINATES_RESULTS_FOLDER` | Folder where exports are written (`results`). |
+| `TELEGRAM_COORDINATES_LOG_LEVEL`, `TELEGRAM_COORDINATES_LOG_FILE` | Logging configuration used by the CLI. |
+
+### Recommendation & discovery controls
+
+| Variable | Purpose |
+| --- | --- |
+| `RECOMMENDATIONS_ENABLED` | Toggle the recommendation banner and menus. |
+| `RECOMMENDATIONS_MIN_SCORE` | Minimum score before a channel is surfaced. |
+| `RECOMMENDATIONS_MIN_HIT_RATE` | Lower bound (in %) of coordinate density. |
+| `RECOMMENDATIONS_SHOW_AT_STARTUP` | Show a summary of the top leads when the CLI starts. |
+| `RECOMMENDATIONS_AUTO_ENRICH` | Allow automatic enrichment runs after a scrape. |
+| `RECOMMENDATIONS_MAX_DISPLAY` | Number of items to show in the banner. |
+| `RECOMMENDATIONS_QUALITY_WEIGHT`, `RECOMMENDATIONS_TRUST_WEIGHT` | Weights used when scoring channels. |
+| `RECOMMENDATIONS_PENALTY_LOW_SAMPLE` | Penalise channels with too few forwards. |
+| `RECOMMENDATIONS_HIDE_ZERO_COORDS` | Hide leads that have never produced coordinates. |
+| `TELEGRAM_RECS_ENABLED` | Enable Telegram API recommendation harvesting. |
+| `TELEGRAM_RECS_MIN_SOURCE_DENSITY` | Minimum hit rate a source must maintain before it seeds recommendations. |
+| `TELEGRAM_RECS_AUTO_HARVEST` | Automatically call the Telegram API to refresh recommendations. |
+| `TELEGRAM_RECS_HARVEST_AFTER_SCRAPE` | Run the auto-harvest step after, rather than before, a scrape. |
+| `TELEGRAM_RECS_MAX_SOURCE_CHANNELS` | Cap the number of sources that feed the recommendation engine. |
+
+### Performance tuning
+
+| Variable | Description |
+| --- | --- |
+| `TELEGRAM_FETCH_BATCH_SIZE` | Number of messages requested from Telegram per batch. |
+| `MESSAGE_PROCESSING_BATCH_SIZE` | Bulk size for message processing and database writes. |
+| `COORDINATE_EXTRACTION_PARALLEL` | Enable multiprocessing for coordinate parsing. |
+| `COORDINATE_PARALLEL_WORKERS` | Worker count when parallel extraction is enabled. |
+| `DATABASE_ENABLED` | Toggle SQLite persistence. |
+| `DATABASE_PATH` | Location of the SQLite database (`telegram_coordinates.db`). |
+| `DATABASE_SKIP_EXISTING` | Skip messages already present in the database. |
+| `DATABASE_WAL_MODE` | Enable SQLite WAL journalling for improved concurrency. |
+| `DATABASE_CACHE_SIZE_MB` | Cache size (MB) passed to SQLite. |
+| `MESSAGE_BATCH_LOG_INTERVAL` | How often progress updates are emitted during bulk scans. |
+
+Refer to `example_credentials.env` for the complete list of supported keys.
 
 ## Usage
 
-### Command-line Interface
+### Interactive CLI
 
-Run the script with Python:
+1. Launch the interface:
 
-```bash
-python Scrape_Coordinates.py
-```
+   ```bash
+   python Scrape_Coordinates.py
+   ```
 
-You'll be prompted to choose one of three options:
+2. Follow the on-screen prompts:
 
-1. **Search a specific channel**: Enter a channel username (e.g., @channelname) or ID
-2. **Search all accessible chats**: The script will scan all chats you have access to
-3. **Process a JSON export**: Process an exported Telegram chat history file
+   - **Quick Scrape** – enter one or more channel usernames/IDs and start
+     immediately. A CSV (and optional database/KML/KMZ export) is created once the
+     scrape finishes.
+   - **Advanced Options** – access the global chat search, JSON import tools,
+     database utilities, recommendation manager, and visualisation menu.
+   - **View Results & Statistics** – inspect database totals, recently created
+     exports, and recommendation summaries.
 
-#### Searching All Accessible Chats
+The first launch runs a setup wizard if credentials or a session file are
+missing. After authentication the session is cached locally and reused on
+subsequent runs.
 
-The **Search all accessible chats** option scans every channel and group you can access for geolocation keywords.
+#### Searching all accessible chats
 
-1. Select **Advanced Options → Search all accessible chats**.
-2. Configure the search when prompted:
-   - **Time limit** – Restrict the search to messages from the last *N* days (optional).
-   - **Messages per chat** – Number of messages to analyse in each chat (default: 200, up to 1000).
-3. Confirm to start the search.
-4. Monitor the real-time progress display showing:
-   - Chats checked
-   - Matches found
-   - Messages scanned
-   - Processing rate
-5. Press `Ctrl+C` at any time to cancel the search. Partial results are preserved.
+The global chat search (Advanced Options → Search all accessible chats)
+processes every channel and group your account can reach:
 
-**Performance tips:**
+1. Configure the search when prompted:
+   - **Time limit** – restrict the run to messages from the last *N* days.
+   - **Messages per chat** – upper bound of messages retrieved for each chat
+     (default 200, up to 1000).
+2. Confirm to begin scanning. A live status line reports chats inspected,
+   matches found, messages processed, and the current processing rate.
+3. Press `Ctrl+C` to cancel without losing partial results.
 
-- Limit the search to recent messages (e.g., 30 days) for faster results.
-- Reduce the messages-per-chat limit (e.g., 50) for quick exploratory scans.
-- Increase the message limit (up to 1000) for deeper, more thorough searches.
+#### Recommendation management
 
-### Command-line Arguments
+Advanced Options → Manage recommended channels provides tooling to:
 
-For automated usage, you can use command-line arguments:
+- Review the ranked queue with quality indicators (🔥 excellent, ⭐ good, 📌
+  moderate, ⚠️ low, ❌ poor).
+- Filter leads by hit rate (press `F` in the banner) or hide zero-hit channels
+  entirely via configuration.
+- Harvest Telegram's "similar channel" recommendations manually or
+  automatically when `TELEGRAM_RECS_AUTO_HARVEST=true`.
+- Recalculate stored scores after adjusting weights or heuristics.
 
-```bash
-# Search a specific channel
-python Scrape_Coordinates.py --mode channel --channel @channelname --output results.csv --export-kml
+### Programmatic scraping
 
-# Search all accessible chats and create a KMZ copy of the results
-python Scrape_Coordinates.py --mode all --output results.csv --export-kmz
-
-# Process a JSON export and provide custom output filenames
-python Scrape_Coordinates.py --mode json --json-file export.json --post-link-base https://t.me/channelname/ \
-  --output results.csv --kml-output results/my_coordinates.kml --kmz-output results/my_coordinates.kmz
-```
-
-### Using as a Package
-
-You can also import the scraper in your own scripts. The `channel_scraper`
-function handles the asynchronous work for you and returns a Pandas
-`DataFrame` with the collected coordinates. The previous
-`TelegramCoordinatesClient` helper has been removed in favor of the
-consolidated `channel_scraper` entry point:
+The `channel_scraper` helper inside `src/channel_scraper.py` exposes the core
+functionality to other scripts:
 
 ```python
 from src.channel_scraper import channel_scraper
 
-def main():
-    df = channel_scraper(
-        channel_links=["@channelname"],
-        date_limit="2023-09-01",
-        output_path="results.csv",
-    )
+# Ensure TELEGRAM_API_ID and TELEGRAM_API_HASH are set in the environment first.
+df = channel_scraper(
+    channel_links=["@channelname"],
+    date_limit="2023-09-01",
+    output_path="results/coordinates.csv",
+    auto_visualize=True,
+)
 
-    if df.empty:
-        print("No coordinates found")
-    else:
-        print(f"Saved {len(df)} coordinates to results.csv")
-
-if __name__ == "__main__":
-    main()
+print(f"Saved {len(df)} coordinates")
 ```
 
-If you prefer to provide credentials programmatically, pass `api_id` and
-`api_hash` directly to `channel_scraper`. Otherwise, the function falls back to
-the `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` environment variables.
+Parameters let you toggle database usage, skip existing messages, export to
+KML/KMZ, or automatically harvest Telegram recommendations before/after a
+scrape.
 
-### Discovery Methods
+### Processing Telegram JSON exports
 
-The scraper combines multiple strategies to surface high-signal coordinate channels:
+You can analyse Telegram Desktop exports offline in two ways:
 
-#### 1. Forward Analysis (Automatic)
+- From the CLI choose **Advanced Options → Process a JSON export file** and
+  follow the prompts to locate the JSON, pick output filenames, and set a base
+  URL for message links.
+- From your own code call `process_telegram_json` in `src/json_processor.py` and
+  use `save_dataframe_to_csv` to persist the results.
 
-Tracks message forwards to identify channels that frequently share geolocated content.
+## Output formats
 
-#### 2. Telegram API Recommendations (Manual/Automatic)
-
-Harvests Telegram's native "similar channels" suggestions from your best-performing sources.
-
-**To harvest Telegram recommendations:**
-
-1. Open **Advanced Options → Manage recommended channels** in the CLI.
-2. Choose **Harvest Telegram API recommendations**.
-3. Set the minimum coordinate density for source channels and optional source limits.
-4. Review the new leads via the recommendation list (options 1 or 2).
-
-**Automatic harvesting:**
-
-Set `TELEGRAM_RECS_AUTO_HARVEST=true` in `.env` to enable background harvesting from high-quality channels (optionally toggle
-`TELEGRAM_RECS_HARVEST_AFTER_SCRAPE` to defer harvesting until the scrape completes).
-
-**Why this works:**
-
-- Telegram's algorithm clusters channels with similar themes.
-- Recommendations surface original content creators, not just forwarders.
-- High-density sources feed additional leads back into the discovery loop.
-- Reduces manual hunting by growing a self-sustaining network of channels.
-
-### Recommendation System
-
-The scraper maintains a queue of recommended channels sourced from forward analysis and Telegram's own suggestions. The scoring
-system is designed to prioritise channels that consistently include usable coordinates.
-
-#### Scoring Overview
-
-- **Coordinate Hit Rate (up to 60 points):**
-  - 80%+ hit rate → Excellent (60 pts)
-  - 60–80% → Very good (55 pts)
-  - 40–60% → Good (45 pts)
-  - 20–40% → Moderate (30 pts)
-  - 10–20% → Low (15 pts)
-  - 5–10% → Very low (5 pts)
-  - <5% → Negligible (0 pts)
-- **Sample Confidence Modifier:** Larger forward counts boost confidence up to ×1.25. Tiny samples (<10 forwards) receive a
-  cautious multiplier and an additional penalty if `RECOMMENDATIONS_PENALTY_LOW_SAMPLE=true` (default).
-- **Trust Signals (up to 40 points):** Source diversity, recency, verification, subscriber counts, and Telegram recommendation
-  metadata provide additive trust bonuses.
-- **Penalties:** Scam/fake channels are scored at zero, and inaccessible channels receive a 50% penalty.
-
-The final score is capped between 0 and 100, keeping high hit-rate channels at the top of the queue while demoting spammy or
-low-signal sources.
-
-#### Quality Indicators
-
-When viewing recommendations in the CLI, each entry displays a quality icon based on hit rate:
-
-- 🔥 **Excellent:** ≥60% of forwards include coordinates.
-- ⭐ **Good:** 40–60% hit rate.
-- 📌 **Moderate:** 20–40% hit rate.
-- ⚠️ **Low:** 5–20% hit rate.
-- ❌ **Poor:** <5% hit rate (a warning is shown when the sample size is meaningful).
-
-#### Filtering Recommendations
-
-From the startup recommendation banner, press **F** to filter suggestions by minimum coordinate hit rate. The management menu
-also honours the global `RECOMMENDATIONS_MIN_HIT_RATE` setting (default 5%) to hide channels that rarely post coordinates. Set
-`RECOMMENDATIONS_HIDE_ZERO_COORDS=true` if you only want to see channels that have already produced at least one coordinate.
-
-#### Recalculating Scores
-
-After changing configuration weights or updating the scoring algorithm, open **Advanced Options → Manage recommended channels →
-Recalculate recommendation scores**. The tool will refresh every stored recommendation using the latest heuristics.
-
-## Processing JSON Exports
-
-To process an exported Telegram chat:
-
-1. **Export chat history from Telegram**:
-   - Open Telegram Desktop
-   - Navigate to the channel/group
-   - Click ⋮ (menu) > Export chat history
-   - Select JSON format (disable media downloads)
-   - Save the file
-
-2. **Process the export**:
-   - Select option 3 in the interactive mode
-   - Enter output file name
-   - Provide path to the JSON file
-   - Specify save location for the CSV
-   - Enter base URL for post links (e.g., https://t.me/channelname/)
-
-## Output Files
-
-The tool writes results to CSV so they can be analyzed or imported into GIS
-software. By default, files are placed in the `results/` directory (the folder
-is created automatically if it does not exist) and use the filename configured
-in `TELEGRAM_COORDINATES_CSV_FILE`.
-
-When the `--export-kml` or `--export-kmz` flags (or their corresponding
-`--kml-output` / `--kmz-output` paths) are provided, the scraper creates
-additional geospatial files alongside the CSV export. These files include the
-same metadata as the CSV and can be opened directly in mapping tools such as
-Google Earth, QGIS, or ArcGIS.
+The CLI writes CSV files to the `results/` directory (automatically created) or
+whichever folder you configure. CSV columns include:
 
 | Column | Description |
 | --- | --- |
-| `Post ID` | Numeric identifier of the Telegram message. |
-| `Channel ID` | Internal Telegram ID for the channel or chat. |
-| `Channel/Group Username` | Public username of the chat when available. |
-| `Message Text` | Excerpt of the message that contained the coordinates. |
-| `Date` | Date the message was published. |
-| `URL` | Direct link to the original Telegram message. |
-| `Latitude` | Latitude in decimal degrees. |
-| `Longitude` | Longitude in decimal degrees. |
+| `message_id` | Telegram message identifier. |
+| `message_content` | Text snippet that contained the coordinates. |
+| `message_media_type` | Media classification derived from the Telegram message. |
+| `message_published_at` | Timestamp of the message. |
+| `message_source` | Channel/group username or ID. |
+| `latitude`, `longitude` | Extracted coordinates in decimal degrees. |
 
-> **Note:** Some entry points expose additional fields. For example, offline
-> JSON processing includes a `Post Link` column, and the simplified
-> `Scrape_Coordinates.py` CLI uses snake_case column names
-> (`message_id`, `message_source`, etc.) while providing the same underlying
-> information.
+When processing JSON exports additional fields such as `Post ID`, `Channel ID`,
+and `Post Link` are included to mirror the structure of the original export. KML
+and KMZ exports replicate the same metadata for use in GIS software.
 
-## Visualizing Results
+## Visualising results
 
-### Integrated Kepler.gl Maps
+Launch **Advanced Options → Visualise coordinates (Kepler.gl)** to build
+interactive HTML maps without leaving the CLI. Presets cover points, heatmaps,
+clusters, arcs, and temporal animations. Set `auto_visualize=True` when calling
+`channel_scraper` programmatically to generate a Kepler.gl map alongside the
+CSV export. See [docs/VISUALIZATION.md](docs/VISUALIZATION.md) for advanced
+configuration tips.
 
-Use the built-in menu under **Advanced Options → Visualise coordinates (Kepler.gl)** to create interactive, shareable maps without leaving the scraper. The visualiser supports multiple presets (points, heatmap, clusters, hexagons, arcs, temporal animations) and outputs standalone HTML files ready for publication. For automation, pass `auto_visualize=True` to `channel_scraper` and a map will be generated alongside your CSV export. Refer to [docs/VISUALIZATION.md](docs/VISUALIZATION.md) for detailed guidance and advanced configuration tips.
+## Recommendation system
+
+Each recommendation combines hit-rate metrics, trust signals, and penalties to
+produce a 0–100 score:
+
+- **Coordinate hit rate (≤60 pts)** – percentage of forwards that include
+  coordinates, weighted by sample size.
+- **Trust signals (≤40 pts)** – subscriber counts, recency, Telegram metadata,
+  and source diversity boost high-quality leads.
+- **Penalties** – inaccessible channels are halved, and confirmed scams are
+  dropped entirely.
+
+The CLI displays quality icons based on hit rate thresholds and highlights
+harvest statistics whenever Telegram recommendations are refreshed.
 
 ## Troubleshooting
 
-### "Could not find the input entity for PeerUser" warnings
+- **"Could not find the input entity for PeerUser" warnings** – clean out stale
+  recommendation entries with:
 
-This message appears when forwards from regular users were mistakenly added as
-recommended channels. Update to the latest release and then run the cleanup
-utility:
+  ```bash
+  python scripts/fix_recommendation_entities.py --database telegram_coordinates.db
+  ```
 
-```bash
-python scripts/fix_recommendation_entities.py --database telegram_coordinates.db
-```
+  or select *Clean up invalid recommendations* from the CLI menu.
 
-You can also select **Clean up invalid recommendations** from the CLI menu
-(Advanced Options → Manage recommended channels) to purge bad records.
+- **`AttributeError: 'RecommendationManager' object has no attribute 'get_recommended_channel'`** – update to the latest
+  release. The recommendation helpers now live on `RecommendationManager`
+  directly.
 
-### AttributeError: 'RecommendationManager' object has no attribute 'get_recommended_channel'
+## Development
 
-Older builds expected recommendation helpers on the database instance. The
-current release exposes convenient proxy methods directly on
-``RecommendationManager``. Update the codebase and rerun the CLI; no further
-action is required once the upgrade is applied.
+- Formatters/linters are not bundled; configure your own tooling if required.
+- Run the automated test suite with:
 
-### "Search all chats" takes too long
+  ```bash
+  pytest
+  ```
 
-- Limit the search to recent messages (e.g., last 30 days).
-- Reduce the messages-per-chat limit (try 50–100 instead of 200).
-- Cancel with `Ctrl+C` and retry with narrower parameters or by selecting specific chats.
-
-### Progress seems stuck
-
-Long gaps usually occur while scanning chats with thousands of messages or when Telegram enforces rate limits.
-
-- Wait 30 seconds to see if the progress counter updates.
-- Review the log output for details.
-- Cancel with `Ctrl+C` and restart with tighter limits if needed.
-
-### Google Earth
-
-1. Open Google Earth or Google Earth Pro
-2. Import the generated KML/KMZ file (or the CSV file if preferred)
-3. If importing CSV, map the latitude and longitude columns when prompted
-4. Adjust display options to style the placemarks
-
-### GIS Tools
-
-The CSV format is compatible with most GIS tools:
-- QGIS
-- ArcGIS
-- Mapbox
-- Tableau
-
-### Web Mapping
-
-For web applications, you can use:
-- Leaflet.js
-- OpenLayers
-- Google Maps API
-- Folium (Python)
-
-Example with Folium:
-
-```python
-import pandas as pd
-import folium
-
-# Load the data
-df = pd.read_csv('coordinates_results.csv')
-
-# Create a map centered at the mean of coordinates
-map_center = [df['Latitude'].astype(float).mean(), df['Longitude'].astype(float).mean()]
-m = folium.Map(location=map_center, zoom_start=6)
-
-# Add markers
-for _, row in df.iterrows():
-    folium.Marker(
-        location=[float(row['Latitude']), float(row['Longitude'])],
-        popup=f"<a href='{row['URL']}' target='_blank'>{row['Message Text'][:100]}...</a>",
-        tooltip=row['Date']
-    ).add_to(m)
-
-# Save the map
-m.save('coordinates_map.html')
-```
-
-## Logging
-
-All operations are logged to both console and file (`telegram_search.log`). The default log level is INFO, which can be changed in the configuration.
-
-## Performance Optimizations
-
-The latest release introduces a batched scraping pipeline designed for large channel archives. The scraper now groups Telegram messages into explicit batches, performs bulk database writes, and keeps coordinate extraction work cache-friendly. On a 10,000 message channel the end-to-end runtime typically drops from roughly 3.5 minutes to just over a minute.
-
-| Operation | Previous approach | Optimised approach | Typical improvement* |
-|-----------|------------------|--------------------|-----------------------|
-| Telegram fetch | Sequential iterator | Explicit 100-message batches | 15–25% faster |
-| Database writes | Per-message INSERT/SELECT | Bulk existence check + upsert | 8–12× faster |
-| Coordinate extraction | Message-at-a-time | Vectorised within batch | 20–30% faster |
-
-*Benchmarks gathered locally on 1k/10k/50k message datasets; exact gains depend on network quality and hardware.
-
-### Batch configuration
-
-Tune performance-sensitive parameters via the `.env` file:
-
-```bash
-TELEGRAM_FETCH_BATCH_SIZE=100      # Messages requested per Telegram API call
-MESSAGE_PROCESSING_BATCH_SIZE=500  # Messages processed before writing to SQLite
-DATABASE_WAL_MODE=true             # Enables concurrent-friendly Write-Ahead Logging
-DATABASE_CACHE_SIZE_MB=64          # SQLite page cache size (MB)
-MESSAGE_BATCH_LOG_INTERVAL=1000    # Progress log cadence
-```
-
-Smaller batch sizes reduce memory pressure on constrained hosts; larger batches improve throughput on servers with ample RAM.
-
-### Troubleshooting slow scrapes
-
-- Verify that the new composite indexes exist: `PRAGMA index_list(messages);`
-- Keep WAL mode enabled for concurrent scraping sessions.
-- Drop the processing batch size to 250 if you encounter memory spikes.
-- When reprocessing historical data, temporarily disable `DATABASE_SKIP_EXISTING` to allow fast bulk upserts.
-
-## Configuration
-
-All runtime settings are sourced from environment variables, which are loaded
-from a local `.env` file. The interactive entry point will create this file on
-first run and prompt for any missing credentials, storing them for future use.
-
-Key variables include:
-
-- `TELEGRAM_API_ID`: Your Telegram API ID
-- `TELEGRAM_API_HASH`: Your Telegram API hash
-- `TELEGRAM_SESSION_NAME`: Session name for Telethon (defaults to
-  `simple_scraper`)
-- `DATABASE_ENABLED`: Enable or disable persistence to the SQLite database
-  (`true` by default)
-- `DATABASE_PATH`: Path to the SQLite database file (`telegram_coordinates.db`
-  by default)
-- `DATABASE_SKIP_EXISTING`: Skip messages that have already been processed
-  (`true` by default)
-
-Additional custom settings can be added to `.env` as needed; they become
-available through the lightweight `Config` helper in `src/config.py`.
-
-## Search Terms
-
-The script filters messages using these key terms (configurable):
-
-```
-"E", "N", "S", "W", "Coordinates", "Geolocation", "Geolocated", "located", "location", "gps",
-"Геолокація", "Геолокований", "Розташований", "Місцезнаходження",  # Ukrainian terms
-"Геолокация", "Геолокированный", "Расположенный", "Местоположение", "Координати"  # Russian terms
-```
-
-## Security Notes
-
-- Your Telegram API credentials are sensitive. Never commit them to public repositories.
-- The `.env` file is added to `.gitignore` by default to prevent accidental exposure.
-- Telethon session files contain authentication data - keep them secure.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-This project is released under the MIT License.
-
-## Disclaimer
-
-This tool is provided for research and informational purposes only. Users are responsible for ensuring their usage complies with Telegram's Terms of Service and any applicable laws. The accuracy of coordinates and associated data is not guaranteed.
