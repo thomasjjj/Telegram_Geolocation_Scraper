@@ -772,9 +772,9 @@ def handle_search_all_chats(
     days_limit = int(days_input) if days_input else None
 
     message_limit_input = prompt_validated(
-        "Messages to check per chat (default 200, max 1000): ",
-        lambda value: value.isdigit() and 1 <= int(value) <= 1000,
-        error_msg="Please enter a number between 1 and 1000",
+        "Messages to check per chat (default 200): ",
+        lambda value: value.isdigit() and int(value) > 0,
+        error_msg="Please enter a positive number",
         allow_empty=True,
         empty_value="200",
     )
