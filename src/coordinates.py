@@ -67,9 +67,57 @@ def dms_to_decimal(degrees, minutes, seconds, direction):
         return None
 
 
+def extract_all_coordinates(text):
+    """Extract every coordinate pair from *text*.
+
+    The function scans for both decimal latitude/longitude pairs as well as
+    degrees-minutes-seconds (DMS) pairs. All detected coordinates are
+    converted to decimal format before being yielded to the caller, allowing
+    downstream consumers to treat them uniformly.
+
+    Args:
+        text (str): Text to search for coordinates.
+
+    Returns:
+        list[tuple[str, str]]: A list of ``(latitude, longitude)`` tuples.
+    """
+
+    if not text:
+        return []
+
+    coordinates = []
+
+    for match in DECIMAL_PATTERN.finditer(text):
+        coordinates.append((match.group("lat"), match.group("lon")))
+
+    for match in DMS_PATTERN.finditer(text):
+        latitude = dms_to_decimal(
+            match.group("lat_deg"),
+            match.group("lat_min"),
+            match.group("lat_sec"),
+            match.group("lat_dir"),
+        )
+        longitude = dms_to_decimal(
+            match.group("lon_deg"),
+            match.group("lon_min"),
+            match.group("lon_sec"),
+            match.group("lon_dir"),
+        )
+
+        if latitude is not None and longitude is not None:
+            coordinates.append((str(latitude), str(longitude)))
+
+    return coordinates
+
+
 def extract_coordinates(text):
     """
-    Extract coordinates from text using the precompiled regex patterns.
+    Extract the first coordinate pair from text using the precompiled regex
+    patterns.
+
+    This is maintained for backwards compatibility with existing callers that
+    expect only a single pair. New callers should prefer
+    :func:`extract_all_coordinates`.
 
     Args:
         text (str): Text to search for coordinates
@@ -77,29 +125,9 @@ def extract_coordinates(text):
     Returns:
         tuple: (latitude, longitude) or None if no coordinates found
     """
-    if not text:
-        return None
-
-    decimal_match = DECIMAL_PATTERN.search(text)
-    if decimal_match:
-        return decimal_match.group("lat"), decimal_match.group("lon")
-
-    dms_match = DMS_PATTERN.search(text)
-    if dms_match:
-        latitude = dms_to_decimal(
-            dms_match.group("lat_deg"),
-            dms_match.group("lat_min"),
-            dms_match.group("lat_sec"),
-            dms_match.group("lat_dir"),
-        )
-        longitude = dms_to_decimal(
-            dms_match.group("lon_deg"),
-            dms_match.group("lon_min"),
-            dms_match.group("lon_sec"),
-            dms_match.group("lon_dir"),
-        )
-        if latitude is not None and longitude is not None:
-            return str(latitude), str(longitude)
+    coordinates = extract_all_coordinates(text)
+    if coordinates:
+        return coordinates[0]
 
     return None
 
@@ -117,4 +145,4 @@ def contains_coordinates(text):
     if not text:
         return False
 
-    return bool(DECIMAL_PATTERN.search(text) or DMS_PATTERN.search(text))
+    return bool(extract_all_coordinates(text))

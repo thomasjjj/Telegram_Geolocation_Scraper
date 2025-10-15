@@ -3,7 +3,7 @@ import logging
 import os
 import time
 import pandas as pd
-from src.coordinates import extract_coordinates
+from src.coordinates import extract_all_coordinates
 
 
 def _get_elapsed_time(start_time):
@@ -157,28 +157,28 @@ def process_telegram_json(json_file_path, post_link_base):
                 last_count = messages_processed
 
             text_field = str(message.get('text', ''))
-            coordinates = extract_coordinates(text_field)
+            coordinate_pairs = extract_all_coordinates(text_field)
 
-            if coordinates:
-                latitude, longitude = coordinates
+            if coordinate_pairs:
                 post_id = message.get('id', 'N/A')
                 post_date = message.get('date', 'N/A')
                 post_type = message.get('type', 'N/A')
                 post_text = text_field
                 media_type = message.get('media_type', 'N/A')
 
-                message_info = {
-                    'Post ID': post_id,
-                    'Post Date': post_date,
-                    'Post Message': post_text,
-                    'Post Type': post_type,
-                    'Media Type': media_type,
-                    'Latitude': latitude,
-                    'Longitude': longitude
-                }
+                for latitude, longitude in coordinate_pairs:
+                    message_info = {
+                        'Post ID': post_id,
+                        'Post Date': post_date,
+                        'Post Message': post_text,
+                        'Post Type': post_type,
+                        'Media Type': media_type,
+                        'Latitude': latitude,
+                        'Longitude': longitude
+                    }
 
-                messages_with_coordinates.append(message_info)
-                logging.info(f"Coordinate found: {latitude}, {longitude} in message ID: {post_id}")
+                    messages_with_coordinates.append(message_info)
+                    logging.info(f"Coordinate found: {latitude}, {longitude} in message ID: {post_id}")
 
         # Final progress update
         last_status_update = _update_progress_display(
