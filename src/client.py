@@ -1,7 +1,9 @@
+import asyncio
 import logging
 import time
 import sys
 from telethon import TelegramClient
+from telethon.errors.rpcerrorlist import FloodWaitError
 from src.coordinates import extract_coordinates
 
 try:
@@ -79,6 +81,20 @@ class TelegramCoordinatesClient:
             return self.total_messages_processed / elapsed
         return 0
 
+    def _format_coordinate_line(self, latitude, longitude, url):
+        """Create a formatted coordinate line for console output."""
+        if colorama_available:
+            return f"{Fore.YELLOW}📍 {latitude}, {longitude} {Fore.BLUE}• {url}{Style.RESET_ALL}"
+        return f"📍 {latitude}, {longitude} • {url}"
+
+    def _print_coordinate(self, latitude, longitude, url):
+        """Print a coordinate to the terminal and prepare display for refresh."""
+        coordinate_line = self._format_coordinate_line(latitude, longitude, url)
+        print(coordinate_line)
+        self.last_coordinate_line = coordinate_line
+        # Ensure the next progress update prints on a new line below the coordinate history
+        self.display_initialized = False
+
     def _update_progress_display(self, coordinates_found, force=False, latest_coordinate=None):
         """Update the progress display with current stats."""
         current_time = time.time()
@@ -121,29 +137,56 @@ class TelegramCoordinatesClient:
         # Update coordinate line if we have a new one
         if latest_coordinate:
             latitude, longitude, url = latest_coordinate
-            if colorama_available:
-                self.last_coordinate_line = (
-                    f"{Fore.YELLOW}📍 {latitude}, {longitude} {Fore.BLUE}• {url}{Style.RESET_ALL}"
-                )
-            else:
-                self.last_coordinate_line = f"📍 {latitude}, {longitude} • {url}"
+            self.last_coordinate_line = self._format_coordinate_line(latitude, longitude, url)
 
-        # If we already initialized the display, move cursor up to rewrite the lines
+        # If we already initialized the display, move cursor up to rewrite the progress line
         if self.display_initialized and colorama_available:
-            # Move up 2 lines (progress + coordinate)
-            sys.stdout.write(Cursor.UP(2) + '\r')
+            sys.stdout.write(Cursor.UP(1) + '\r')
+            sys.stdout.write('\033[K')
 
         # Print the status line
         print(progress_status)
 
-        # Print the coordinate line if we have one
-        if self.last_coordinate_line:
-            print(self.last_coordinate_line)
-        else:
-            print("No coordinates found yet...")
-
         # Mark display as initialized
         self.display_initialized = True
+
+    @staticmethod
+    def _format_wait_duration(seconds):
+        """Return a human-readable wait duration string."""
+        if seconds >= 3600:
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            return f"{hours}h {minutes}m"
+        if seconds >= 60:
+            minutes = int(seconds // 60)
+            remaining_seconds = int(seconds % 60)
+            return f"{minutes}m {remaining_seconds}s"
+        return f"{int(seconds)}s"
+
+    async def _iter_messages_with_retry(self, channel_entity, search_term):
+        """Iterate over messages while handling Telegram flood wait errors."""
+        offset_id = 0
+
+        while True:
+            try:
+                async for message in self.client.iter_messages(
+                    channel_entity,
+                    search=search_term,
+                    offset_id=offset_id
+                ):
+                    yield message
+                    offset_id = message.id
+                break
+            except FloodWaitError as e:
+                wait_seconds = max(e.seconds, 0)
+                sleep_duration = wait_seconds + 1
+                wait_message = (
+                    f"Flood wait encountered while searching for '{search_term}'. "
+                    f"Sleeping for {self._format_wait_duration(sleep_duration)}."
+                )
+                logging.warning(wait_message)
+                print(wait_message)
+                await asyncio.sleep(sleep_duration)
 
     def _log_progress(self, message_count, coordinate_count, is_final=False):
         """Log progress information."""
@@ -198,7 +241,7 @@ class TelegramCoordinatesClient:
             logging.info(f"Searching for term '{search_term}' in {channel_name}")
             try:
                 progress_interval = 100  # Log progress every 100 messages
-                async for message in self.client.iter_messages(channel_entity, search=search_term):
+                async for message in self._iter_messages_with_retry(channel_entity, search_term):
                     messages_processed += 1
                     self.total_messages_processed += 1
 
@@ -231,9 +274,13 @@ class TelegramCoordinatesClient:
                             # Pass the latest coordinate info to update display
                             latest_coordinate = (latitude, longitude, url)
 
-                            # Update display with the latest coordinate
-                            self._update_progress_display(coordinates_found, force=False,
-                                                          latest_coordinate=latest_coordinate)
+                            # Print coordinate and update display
+                            self._print_coordinate(latitude, longitude, url)
+                            self._update_progress_display(
+                                coordinates_found,
+                                force=True,
+                                latest_coordinate=latest_coordinate
+                            )
 
                             # Log to file but don't output to console (our display handles it)
                             logging.info(
