@@ -24,6 +24,7 @@ This Python package extracts geographical coordinates from Telegram messages, su
   - Latitude and longitude in decimal format
   - CSV export for easy analysis
   - Optional KML/KMZ export for direct use in Google Earth and GIS tools
+  - Interactive Kepler.gl maps (points, heatmaps, clusters, 3D hexagons, temporal playback)
 
 - **Configuration Options**:
   - Environment variables
@@ -39,6 +40,8 @@ This Python package extracts geographical coordinates from Telegram messages, su
   - telethon>=1.24.0
   - pandas>=1.3.0
   - python-dotenv>=0.21.0
+  - keplergl>=0.3.2 (interactive visualisation)
+  - jupyter>=1.0.0 (Kepler.gl HTML export support)
 
 ## Installation
 
@@ -191,6 +194,10 @@ Google Earth, QGIS, or ArcGIS.
 > information.
 
 ## Visualizing Results
+
+### Integrated Kepler.gl Maps
+
+Use the built-in menu under **Advanced Options → Visualise coordinates (Kepler.gl)** to create interactive, shareable maps without leaving the scraper. The visualiser supports multiple presets (points, heatmap, clusters, hexagons, arcs, temporal animations) and outputs standalone HTML files ready for publication. For automation, pass `auto_visualize=True` to `channel_scraper` and a map will be generated alongside your CSV export. Refer to [docs/VISUALIZATION.md](docs/VISUALIZATION.md) for detailed guidance and advanced configuration tips.
 
 ### Google Earth
 

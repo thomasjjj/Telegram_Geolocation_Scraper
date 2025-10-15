@@ -7,6 +7,7 @@ import datetime
 import logging
 import os
 import re
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
@@ -257,6 +258,8 @@ def channel_scraper(
     db_path: Optional[str] = None,
     database: Optional[CoordinatesDatabase] = None,
     recommendation_manager: "RecommendationManager" | None = None,
+    auto_visualize: bool = False,
+    visualization_type: str = "auto",
 ) -> pd.DataFrame:
     """Scrape Telegram channels for coordinates and optionally export the results.
 
@@ -389,6 +392,27 @@ def channel_scraper(
                 LOGGER.info("Successfully saved KMZ to %s", kmz_output_path)
         if not output_path and not (kml_output_path or kmz_output_path):
             LOGGER.info("Collected %s coordinates (no export paths provided)", len(df))
+
+        if auto_visualize:
+            import importlib.util
+
+            if importlib.util.find_spec("keplergl") is None:
+                LOGGER.info(
+                    "Skipping auto-visualisation because the optional 'keplergl' dependency is not installed."
+                )
+            else:
+                map_output = (
+                    str(Path(output_path).with_suffix(".html"))
+                    if output_path
+                    else "results/auto_generated_map.html"
+                )
+                try:
+                    from src.kepler_visualizer import create_map
+
+                    create_map(df, map_output, visualization_type=visualization_type)
+                    LOGGER.info("Interactive map generated at %s", map_output)
+                except Exception as exc:  # pragma: no cover - best-effort visualisation
+                    LOGGER.warning("Failed to create interactive map: %s", exc)
     else:
         LOGGER.info("No coordinates found.")
 
