@@ -113,40 +113,34 @@ python Scrape_Coordinates.py --mode json --json-file export.json --post-link-bas
 
 ### Using as a Package
 
-You can also use the tool as a Python package:
+You can also import the scraper in your own scripts. The `channel_scraper`
+function handles the asynchronous work for you and returns a Pandas
+`DataFrame` with the collected coordinates. The previous
+`TelegramCoordinatesClient` helper has been removed in favor of the
+consolidated `channel_scraper` entry point:
 
 ```python
-import asyncio
-from telegram_coordinates_scraper import Config, TelegramCoordinatesClient, CoordinatesWriter
+from src.channel_scraper import channel_scraper
 
-async def main():
-    # Initialize configuration
-    config = Config()
-    
-    # Get credentials and settings
-    api_id, api_hash = config.get_telegram_credentials()
-    session_name = config.get_session_name()
-    search_terms = config.get_search_terms()
-    csv_file = config.get_output_file()
-    
-    # Initialize client
-    client = TelegramCoordinatesClient(api_id, api_hash, session_name)
-    await client.start()
-    
-    try:
-        # Search a specific channel
-        channel = "@channelname"
-        entity = await client.get_entity(channel)
-        
-        with CoordinatesWriter(csv_file) as writer:
-            found = await client.search_channel(entity, search_terms, writer)
-            print(f"Found {found} coordinates")
-    finally:
-        await client.disconnect()
+def main():
+    df = channel_scraper(
+        channel_links=["@channelname"],
+        date_limit="2023-09-01",
+        output_path="results.csv",
+    )
+
+    if df.empty:
+        print("No coordinates found")
+    else:
+        print(f"Saved {len(df)} coordinates to results.csv")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
 ```
+
+If you prefer to provide credentials programmatically, pass `api_id` and
+`api_hash` directly to `channel_scraper`. Otherwise, the function falls back to
+the `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` environment variables.
 
 ## Processing JSON Exports
 
