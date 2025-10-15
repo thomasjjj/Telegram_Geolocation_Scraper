@@ -317,48 +317,135 @@ async def _search_dialogs_for_keywords(
     if days_limit is not None:
         cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days_limit)
 
-    LOGGER.debug(
-        "Searching dialogs for keywords with session '%s' (limit=%s, days_limit=%s)",
+    keyword_list = list(keywords)
+
+    LOGGER.info(
+        "Starting chat search: session=%s, message_limit=%d, days_limit=%s",
         session_name,
         message_limit,
         days_limit,
     )
 
     results: List[SearchResult] = []
+    dialogs_checked = 0
+    messages_scanned = 0
+    start_time = datetime.datetime.utcnow()
 
-    async with TelegramClient(session_name, api_id, api_hash) as client:
-        async for dialog in client.iter_dialogs():
-            if dialog.is_user:
-                continue
+    # Initial feedback for the user to set expectations.
+    print("\n" + "=" * 60)
+    print("🔍 SEARCHING ALL ACCESSIBLE CHATS")
+    print("=" * 60)
+    print("This may take several minutes depending on:")
+    print("  - Number of chats you have access to")
+    print("  - Number of messages in each chat")
+    print("  - Telegram API rate limits")
+    print("\nSearching for keywords:", ", ".join(keyword_list[:5]))
+    if len(keyword_list) > 5:
+        print(f"  ...and {len(keyword_list) - 5} more")
+    print("\n⚠️  Press Ctrl+C at any time to cancel\n")
+    print("-" * 60)
 
-            entity = dialog.entity
-            match_keyword = None
-            excerpt = None
+    try:
+        async with TelegramClient(session_name, api_id, api_hash) as client:
+            async for dialog in client.iter_dialogs():
+                dialogs_checked += 1
 
-            async for message in client.iter_messages(entity, limit=message_limit):
-                if cutoff and message.date and message.date < cutoff:
-                    break
-
-                message_text = message.message or ""
-                if not message_text:
+                if dialog.is_user:
                     continue
 
-                normalized = message_text.lower()
-                for keyword in keywords:
-                    if keyword.lower() in normalized:
-                        match_keyword = keyword
-                        start_idx = max(normalized.find(keyword.lower()) - 40, 0)
-                        end_idx = min(start_idx + 120, len(message_text))
-                        excerpt = message_text[start_idx:end_idx].replace("\n", " ")
+                entity = dialog.entity
+                chat_name = dialog.name or getattr(entity, "username", None) or f"ID:{entity.id}"
+                match_keyword = None
+                excerpt = None
+                messages_in_chat = 0
+
+                if dialogs_checked % 10 == 0:
+                    elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
+                    rate = dialogs_checked / elapsed if elapsed > 0 else 0
+                    print(
+                        f"\r📊 Searched: {dialogs_checked} chats | "
+                        f"Matches: {len(results)} | "
+                        f"Messages: {messages_scanned} | "
+                        f"Rate: {rate:.1f} chats/sec",
+                        end="",
+                        flush=True,
+                    )
+
+                LOGGER.debug("Checking chat: %s (ID: %s)", chat_name, getattr(entity, "id", "unknown"))
+
+                async for message in client.iter_messages(entity, limit=message_limit):
+                    messages_scanned += 1
+                    messages_in_chat += 1
+
+                    if cutoff and message.date and message.date < cutoff:
+                        break
+
+                    message_text = message.message or ""
+                    if not message_text:
+                        continue
+
+                    normalized = message_text.lower()
+                    for keyword in keyword_list:
+                        lowered_keyword = keyword.lower()
+                        if lowered_keyword in normalized:
+                            match_keyword = keyword
+                            start_idx = max(normalized.find(lowered_keyword) - 40, 0)
+                            end_idx = min(start_idx + 120, len(message_text))
+                            excerpt = message_text[start_idx:end_idx].replace("\n", " ")
+                            break
+
+                    if match_keyword:
                         break
 
                 if match_keyword:
-                    break
+                    results.append(
+                        {
+                            "dialog": dialog,
+                            "entity": entity,
+                            "keyword": match_keyword,
+                            "excerpt": excerpt,
+                        }
+                    )
+                    print(
+                        f"\r✅ Match #{len(results)}: {chat_name} (keyword: '{match_keyword}')" + " " * 20,
+                        end="",
+                        flush=True,
+                    )
+                    print()
+                    LOGGER.info(
+                        "Found keyword '%s' in chat '%s' after checking %d messages",
+                        match_keyword,
+                        chat_name,
+                        messages_in_chat,
+                    )
 
-            if match_keyword:
-                results.append({"dialog": dialog, "entity": entity, "keyword": match_keyword, "excerpt": excerpt})
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Search cancelled by user")
+        print(f"Partial results: Checked {dialogs_checked} chats, found {len(results)} matches")
+        LOGGER.info("Chat search cancelled by user after checking %d chats", dialogs_checked)
+        return results
 
-    LOGGER.info("Found %d chats with potential keyword matches", len(results))
+    # Ensure any inline progress line is terminated cleanly.
+    print()
+
+    elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
+    print("-" * 60)
+    print("\n✅ SEARCH COMPLETE")
+    print(f"   • Total chats checked: {dialogs_checked}")
+    print(f"   • Total messages scanned: {messages_scanned}")
+    print(f"   • Matches found: {len(results)}")
+    print(f"   • Time elapsed: {elapsed:.1f} seconds")
+    rate = dialogs_checked / elapsed if elapsed > 0 else 0
+    print(f"   • Average rate: {rate:.1f} chats/sec")
+    print("=" * 60 + "\n")
+
+    LOGGER.info(
+        "Chat search completed: checked=%d, matches=%d, time=%.1fs",
+        dialogs_checked,
+        len(results),
+        elapsed,
+    )
+
     return results
 
 
@@ -612,25 +699,83 @@ def handle_search_all_chats(
     env_path: Path,
 ) -> None:
     session_name = prompt_session_name("Enter the session name", config=config, env_path=env_path)
-    LOGGER.info("Searching all chats for geolocation keywords")
-    results = asyncio.run(
-        _search_dialogs_for_keywords(api_id=api_id, api_hash=api_hash, session_name=session_name, keywords=DEFAULT_GEO_KEYWORDS)
+    print("\n=== Search Configuration ===")
+    print("You can limit the search to recent messages to speed things up.\n")
+
+    days_input = prompt_validated(
+        "Limit to messages from last N days (leave blank for all messages): ",
+        lambda value: value.isdigit() and int(value) > 0,
+        error_msg="Please enter a positive number of days",
+        allow_empty=True,
     )
-    if not results:
-        print("No chats containing the default geolocation keywords were found.")
+    days_limit = int(days_input) if days_input else None
+
+    message_limit_input = prompt_validated(
+        "Messages to check per chat (default 200, max 1000): ",
+        lambda value: value.isdigit() and 1 <= int(value) <= 1000,
+        error_msg="Please enter a number between 1 and 1000",
+        allow_empty=True,
+        empty_value="200",
+    )
+    message_limit = int(message_limit_input)
+
+    print("\n⚠️  Search Settings:")
+    print(f"   • Session: {session_name}")
+    print(f"   • Messages per chat: {message_limit}")
+    print(
+        f"   • Time limit: {'Last ' + str(days_limit) + ' days' if days_limit else 'All time'}"
+    )
+    print(f"   • Keywords: {len(DEFAULT_GEO_KEYWORDS)} geolocation terms")
+    print()
+
+    confirm = input("Start search? (y/N): ").strip().lower()
+    if confirm != "y":
+        print("Search cancelled.")
         return
 
-    print("The following chats mention geolocation keywords:")
+    LOGGER.info(
+        "Searching all chats for geolocation keywords (limit=%d, days_limit=%s)",
+        message_limit,
+        days_limit,
+    )
+    results = asyncio.run(
+        _search_dialogs_for_keywords(
+            api_id=api_id,
+            api_hash=api_hash,
+            session_name=session_name,
+            keywords=DEFAULT_GEO_KEYWORDS,
+            message_limit=message_limit,
+            days_limit=days_limit,
+        )
+    )
+    if not results:
+        print("❌ No chats containing geolocation keywords were found.")
+        print("\nTips:")
+        print("  • Try increasing the messages per chat limit")
+        print("  • Remove the time limit to search older messages")
+        print("  • Check that your keywords match the language used in chats")
+        return
+
+    print("The following chats mention geolocation keywords:\n")
     for idx, result in enumerate(results, start=1):
         entity = result["entity"]
         username = getattr(entity, "username", None)
         dialog_name = result["dialog"].name or username or str(entity.id)
         identifier = f"@{username}" if username else f"ID {entity.id}"
-        print(f"  [{idx}] {dialog_name} ({identifier}) - keyword: {result['keyword']}")
+        keyword = result["keyword"]
+        excerpt = result.get("excerpt", "")
+
+        print(f"  [{idx}] {dialog_name} ({identifier})")
+        print(f"      Keyword: '{keyword}'")
+        if excerpt:
+            preview = excerpt[:80]
+            suffix = "..." if len(excerpt) > 80 else ""
+            print(f"      Preview: {preview}{suffix}")
+        print()
 
     selection = input("Enter numbers to scan (comma separated) or press Enter to scan all: ").strip()
     if selection:
-        indices = []
+        indices: List[int] = []
         for item in selection.split(","):
             item = item.strip()
             if item.isdigit():
@@ -639,7 +784,7 @@ def handle_search_all_chats(
     else:
         chosen = results
 
-    channels = []
+    channels: List[str] = []
     for result in chosen:
         entity = result["entity"]
         username = getattr(entity, "username", None)
