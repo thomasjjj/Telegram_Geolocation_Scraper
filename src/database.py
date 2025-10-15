@@ -20,11 +20,13 @@ import sqlite3
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from telethon.extensions import BinaryReader
 
 import pandas as pd
+
+from src.config import Config
 
 
 LOGGER = logging.getLogger(__name__)
@@ -134,8 +136,25 @@ class CoordinatesDatabase:
             "CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id)",
             "CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(message_date)",
             "CREATE INDEX IF NOT EXISTS idx_messages_coordinates ON messages(has_coordinates)",
+            "CREATE INDEX IF NOT EXISTS idx_messages_channel_msgid ON messages(channel_id, message_id)",
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_coords_cover
+            ON messages(channel_id, has_coordinates, message_id, message_date)
+            WHERE has_coordinates = 1
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_unprocessed
+            ON messages(channel_id, message_date)
+            WHERE has_coordinates = 0
+            """,
             "CREATE INDEX IF NOT EXISTS idx_coordinates_message ON coordinates(message_ref)",
+            "CREATE INDEX IF NOT EXISTS idx_coordinates_message_location ON coordinates(message_ref, latitude, longitude)",
             "CREATE INDEX IF NOT EXISTS idx_channels_density ON channels(coordinate_density DESC)",
+            """
+            CREATE INDEX IF NOT EXISTS idx_channels_active_density
+            ON channels(is_active, coordinate_density DESC)
+            WHERE is_active = 1
+            """,
             """
             CREATE TABLE IF NOT EXISTS recommended_channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -197,6 +216,10 @@ class CoordinatesDatabase:
             """,
             "CREATE INDEX IF NOT EXISTS idx_recommended_score ON recommended_channels(recommendation_score DESC)",
             "CREATE INDEX IF NOT EXISTS idx_recommended_status ON recommended_channels(user_status)",
+            """
+            CREATE INDEX IF NOT EXISTS idx_recommended_score_status
+            ON recommended_channels(user_status, recommendation_score DESC)
+            """,
             "CREATE INDEX IF NOT EXISTS idx_forwards_from ON channel_forwards(from_channel_id)",
             "CREATE INDEX IF NOT EXISTS idx_forwards_to ON channel_forwards(to_channel_id)",
             "CREATE INDEX IF NOT EXISTS idx_forwards_coordinates ON channel_forwards(had_coordinates)",
@@ -221,6 +244,21 @@ class CoordinatesDatabase:
             with connection:
                 for statement in schema_statements:
                     connection.execute(statement)
+
+            config = Config()
+            if config.database_wal_mode:
+                connection.execute("PRAGMA journal_mode = WAL")
+            else:
+                connection.execute("PRAGMA journal_mode = DELETE")
+
+            connection.execute("PRAGMA synchronous = NORMAL")
+
+            cache_size_mb = config.database_cache_size_mb
+            if cache_size_mb:
+                cache_size_kb = cache_size_mb * 1024
+                connection.execute(f"PRAGMA cache_size = -{cache_size_kb}")
+
+            connection.execute("PRAGMA temp_store = MEMORY")
         except sqlite3.DatabaseError as error:
             LOGGER.error("Failed to initialise database schema: %s", error)
             return False
@@ -239,6 +277,34 @@ class CoordinatesDatabase:
         query = "SELECT 1 FROM messages WHERE channel_id=? AND message_id=?"
         cursor = self.connect().execute(query, (channel_id, message_id))
         return cursor.fetchone() is not None
+
+    def bulk_check_message_existence(
+        self, channel_id: int, message_ids: Sequence[int]
+    ) -> Set[int]:
+        """Return the subset of *message_ids* that already exist in the database."""
+
+        deduplicated = list(dict.fromkeys(int(mid) for mid in message_ids if mid is not None))
+        if not deduplicated:
+            return set()
+
+        placeholders = ",".join("?" for _ in deduplicated)
+        sql = (
+            "SELECT message_id FROM messages WHERE channel_id=? AND message_id IN ("
+            f"{placeholders})"
+        )
+        params: List[Any] = [int(channel_id), *deduplicated]
+        cursor = self.connect().execute(sql, params)
+        existing = {int(row["message_id"]) for row in cursor.fetchall()}
+
+        if existing:
+            LOGGER.debug(
+                "Bulk existence check: %s/%s messages already stored for channel %s",
+                len(existing),
+                len(deduplicated),
+                channel_id,
+            )
+
+        return existing
 
     def add_message(
         self,
@@ -326,6 +392,114 @@ class CoordinatesDatabase:
             if row_id:
                 inserted += 1
         return inserted
+
+    def bulk_insert_messages(
+        self, channel_id: int, messages: Sequence[Dict[str, Any]]
+    ) -> Dict[int, int]:
+        """Insert multiple messages in a single transaction.
+
+        Parameters
+        ----------
+        channel_id:
+            Telegram channel identifier.
+        messages:
+            Iterable of dictionaries describing the message payload. Supported
+            keys mirror the :func:`add_message` helper.
+
+        Returns
+        -------
+        Dict[int, int]
+            Mapping of ``message_id`` to the corresponding ``messages`` row ID.
+        """
+
+        if not messages:
+            return {}
+
+        sql = """
+            INSERT INTO messages (
+                channel_id,
+                message_id,
+                message_text,
+                message_date,
+                media_type,
+                has_coordinates,
+                processed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(channel_id, message_id) DO UPDATE SET
+                message_text=COALESCE(excluded.message_text, messages.message_text),
+                message_date=COALESCE(excluded.message_date, messages.message_date),
+                media_type=COALESCE(excluded.media_type, messages.media_type),
+                has_coordinates=CASE
+                    WHEN excluded.has_coordinates=1 THEN 1
+                    ELSE messages.has_coordinates
+                END,
+                last_updated=CURRENT_TIMESTAMP
+        """
+
+        rows: List[Tuple[Any, ...]] = []
+        message_ids: List[int] = []
+        for payload in messages:
+            try:
+                message_id = int(payload["message_id"])
+            except (KeyError, TypeError, ValueError) as error:
+                LOGGER.warning("Skipping malformed message payload %s: %s", payload, error)
+                continue
+
+            message_ids.append(message_id)
+            rows.append(
+                (
+                    int(channel_id),
+                    message_id,
+                    payload.get("message_text"),
+                    payload.get("message_date"),
+                    payload.get("media_type", "text"),
+                    int(payload.get("has_coordinates", 0)),
+                )
+            )
+
+        if not message_ids:
+            return {}
+
+        connection = self.connect()
+        with connection:
+            connection.executemany(sql, rows)
+
+        placeholders = ",".join("?" for _ in message_ids)
+        cursor = connection.execute(
+            f"""
+            SELECT message_id, id FROM messages
+            WHERE channel_id=? AND message_id IN ({placeholders})
+            """,
+            [int(channel_id), *message_ids],
+        )
+
+        id_map = {int(row["message_id"]): int(row["id"]) for row in cursor.fetchall()}
+
+        LOGGER.info(
+            "Bulk upserted %s messages for channel %s",
+            len(message_ids),
+            channel_id,
+        )
+        return id_map
+
+    def bulk_update_message_coordinates(
+        self, channel_id: int, message_ids: Sequence[int]
+    ) -> None:
+        """Mark messages as containing coordinates in a single update."""
+
+        deduplicated = list(dict.fromkeys(int(mid) for mid in message_ids if mid is not None))
+        if not deduplicated:
+            return
+
+        placeholders = ",".join("?" for _ in deduplicated)
+        sql = (
+            "UPDATE messages SET has_coordinates=1, last_updated=CURRENT_TIMESTAMP "
+            "WHERE channel_id=? AND message_id IN (" + placeholders + ")"
+        )
+
+        connection = self.connect()
+        with connection:
+            connection.execute(sql, [int(channel_id), *deduplicated])
 
     def get_latest_message_id(self, channel_id: int) -> Optional[int]:
         cursor = self.connect().execute(
