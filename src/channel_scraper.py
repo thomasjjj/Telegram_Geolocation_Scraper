@@ -8,7 +8,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import pandas as pd
 from telethon import TelegramClient
@@ -17,6 +17,9 @@ from telethon.tl.types import Channel, Chat, MessageMediaDocument, MessageMediaP
 from src.coordinates import extract_coordinates
 from src.database import CoordinatesDatabase
 from src.export import save_dataframe_to_kml, save_dataframe_to_kmz
+
+if TYPE_CHECKING:  # pragma: no cover - optional dependency for type checking
+    from src.recommendations import RecommendationManager
 
 
 LOGGER = logging.getLogger(__name__)
@@ -48,6 +51,7 @@ async def scrape_channel(
     coordinate_pattern: Optional[re.Pattern] = None,
     database: Optional[CoordinatesDatabase] = None,
     skip_existing: bool = True,
+    recommendation_manager: "RecommendationManager" | None = None,
 ) -> Tuple[List[int], List[str], List[str], List[str], List[str], List[float], List[float], ScrapeStats]:
     """Scrape a single channel for coordinates with optional database integration."""
 
@@ -181,6 +185,17 @@ async def scrape_channel(
                         {"has_coordinates": 1, "last_updated": datetime.datetime.utcnow().isoformat()},
                     )
 
+            if recommendation_manager:
+                try:
+                    recommendation_manager.process_forwarded_message(
+                        message=message,
+                        current_channel_id=resolved_channel_id,
+                        has_coordinates=has_coordinates,
+                        message_row_id=row_id if row_id else None,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    LOGGER.debug("Recommendation processing failed for message %s: %s", message.id, exc)
+
         if database:
             database.update_channel_statistics(resolved_channel_id)
 
@@ -218,6 +233,7 @@ def channel_scraper(
     skip_existing: bool = True,
     db_path: Optional[str] = None,
     database: Optional[CoordinatesDatabase] = None,
+    recommendation_manager: "RecommendationManager" | None = None,
 ) -> pd.DataFrame:
     """Scrape Telegram channels for coordinates and save the results."""
 
@@ -278,6 +294,7 @@ def channel_scraper(
                         coordinate_pattern,
                         database=database_instance,
                         skip_existing=skip_existing,
+                        recommendation_manager=recommendation_manager,
                     )
 
                     stats = result[-1]
