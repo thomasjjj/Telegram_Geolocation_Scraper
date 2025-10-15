@@ -3,3 +3,4 @@ pandas>=1.3.0
 python-dotenv>=0.21.0
 dotenv~=0.9.9
 colorama>=0.4.4
+ijson>=3.2
