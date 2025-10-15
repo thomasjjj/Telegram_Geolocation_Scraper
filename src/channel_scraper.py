@@ -337,6 +337,8 @@ def channel_scraper(
     visualization_type: str = "auto",
     batch_size: int = 5000,
     collect_results: bool = True,
+    auto_harvest_recommendations: bool = False,
+    harvest_after_scrape: bool = False,
 ) -> pd.DataFrame:
     """Scrape Telegram channels for coordinates and optionally export the results.
 
@@ -389,6 +391,41 @@ def channel_scraper(
     database_instance: Optional[CoordinatesDatabase] = None
     if use_database:
         database_instance = database or CoordinatesDatabase(db_path or "telegram_coordinates.db")
+
+    harvest_enabled = bool(auto_harvest_recommendations and recommendation_manager)
+
+    def _run_auto_harvest(stage: str) -> None:
+        if not harvest_enabled or not recommendation_manager:
+            return
+
+        settings = recommendation_manager.settings
+        LOGGER.info("Auto-harvesting Telegram recommendations %s scrape...", stage)
+
+        async def _harvest_runner() -> Dict[str, Any]:
+            async with TelegramClient(session_name, api_id, api_hash) as client:
+                return await recommendation_manager.harvest_telegram_recommendations(
+                    client,
+                    min_coordinate_density=settings.telegram_min_source_density,
+                    max_source_channels=settings.telegram_max_source_channels,
+                )
+
+        try:
+            stats = asyncio.run(_harvest_runner())
+            LOGGER.info(
+                "Telegram recommendation harvest (%s) complete: %s new, %s updated",
+                stage,
+                stats.get("new_recommendations", 0),
+                stats.get("updated_recommendations", 0),
+            )
+        except (RPCError, ValueError, OSError) as exc:
+            LOGGER.warning(
+                "Telegram recommendation harvest (%s) failed: %s",
+                stage,
+                exc,
+            )
+
+    if harvest_enabled and not harvest_after_scrape:
+        _run_auto_harvest("before")
 
     async def runner() -> None:
         async with TelegramClient(session_name, api_id, api_hash) as client:
@@ -486,5 +523,8 @@ def channel_scraper(
         )
     else:
         LOGGER.info("No coordinates found.")
+
+    if harvest_enabled and harvest_after_scrape:
+        _run_auto_harvest("after")
 
     return df

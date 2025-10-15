@@ -57,6 +57,15 @@ You can also call `CoordinateVisualizer.export_config()` to persist a configurat
 - **Auto-visualisation** – Pass `auto_visualize=True` to `channel_scraper` to automatically build an HTML map alongside CSV/KML exports.
 - **Examples** – Review `examples/visualization_examples.py` for end-to-end demonstrations of the API.
 
+## Recommendation Statistics
+
+Use the dashboard views to monitor discovery effectiveness:
+
+- Forward-based discoveries and hit rates.
+- Telegram API recommendation volume and conversion.
+- Combined recommendation scores after enrichment.
+- Average source density for Telegram-suggested channels.
+
 ## Troubleshooting
 
 | Issue | Resolution |

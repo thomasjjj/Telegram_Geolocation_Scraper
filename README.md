@@ -167,6 +167,37 @@ If you prefer to provide credentials programmatically, pass `api_id` and
 `api_hash` directly to `channel_scraper`. Otherwise, the function falls back to
 the `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` environment variables.
 
+### Discovery Methods
+
+The scraper combines multiple strategies to surface high-signal coordinate channels:
+
+#### 1. Forward Analysis (Automatic)
+
+Tracks message forwards to identify channels that frequently share geolocated content.
+
+#### 2. Telegram API Recommendations (Manual/Automatic)
+
+Harvests Telegram's native "similar channels" suggestions from your best-performing sources.
+
+**To harvest Telegram recommendations:**
+
+1. Open **Advanced Options → Manage recommended channels** in the CLI.
+2. Choose **Harvest Telegram API recommendations**.
+3. Set the minimum coordinate density for source channels and optional source limits.
+4. Review the new leads via the recommendation list (options 1 or 2).
+
+**Automatic harvesting:**
+
+Set `TELEGRAM_RECS_AUTO_HARVEST=true` in `.env` to enable background harvesting from high-quality channels (optionally toggle
+`TELEGRAM_RECS_HARVEST_AFTER_SCRAPE` to defer harvesting until the scrape completes).
+
+**Why this works:**
+
+- Telegram's algorithm clusters channels with similar themes.
+- Recommendations surface original content creators, not just forwarders.
+- High-density sources feed additional leads back into the discovery loop.
+- Reduces manual hunting by growing a self-sustaining network of channels.
+
 ## Processing JSON Exports
 
 To process an exported Telegram chat:

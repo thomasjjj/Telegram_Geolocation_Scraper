@@ -15,6 +15,45 @@ from src.database import CoordinatesDatabase
 LOGGER = logging.getLogger(__name__)
 
 
+def migrate_schema_for_telegram_recs(db_path: str) -> None:
+    """Add columns required for Telegram API recommendation tracking."""
+
+    connection = sqlite3.connect(db_path)
+    try:
+        cursor = connection.cursor()
+        migrations = [
+            """
+            ALTER TABLE recommended_channels
+            ADD COLUMN discovery_method TEXT DEFAULT 'forward'
+            """,
+            """
+            ALTER TABLE recommended_channels
+            ADD COLUMN telegram_recommendation_count INTEGER DEFAULT 0
+            """,
+            """
+            ALTER TABLE recommended_channels
+            ADD COLUMN telegram_rec_source_density REAL DEFAULT 0.0
+            """,
+            """
+            ALTER TABLE recommended_channels
+            ADD COLUMN last_harvest_date DATETIME
+            """,
+        ]
+
+        for statement in migrations:
+            try:
+                cursor.execute(statement)
+                connection.commit()
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" in str(exc).lower():
+                    continue
+                raise
+    finally:
+        connection.close()
+
+    LOGGER.info("Schema migration for Telegram recommendations completed")
+
+
 def _extract_channel_from_source(source: str) -> tuple[Optional[int], Optional[str]]:
     if not source or not isinstance(source, str):
         return None, None
@@ -128,5 +167,9 @@ def detect_and_migrate_all_results(results_folder: str = "results", database: Op
     return total_imported
 
 
-__all__ = ["migrate_existing_csv_to_database", "detect_and_migrate_all_results"]
+__all__ = [
+    "migrate_existing_csv_to_database",
+    "detect_and_migrate_all_results",
+    "migrate_schema_for_telegram_recs",
+]
 

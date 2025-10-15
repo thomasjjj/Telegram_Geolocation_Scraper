@@ -685,6 +685,16 @@ def handle_specific_channel(
         db_path=db_config.get("path"),
         database=database,
         recommendation_manager=recommendation_manager,
+        auto_harvest_recommendations=(
+            recommendation_manager.settings.telegram_auto_harvest
+            if recommendation_manager
+            else False
+        ),
+        harvest_after_scrape=(
+            recommendation_manager.settings.telegram_harvest_after_scrape
+            if recommendation_manager
+            else False
+        ),
     )
 
 
@@ -806,6 +816,16 @@ def handle_search_all_chats(
         db_path=db_config.get("path"),
         database=database,
         recommendation_manager=recommendation_manager,
+        auto_harvest_recommendations=(
+            recommendation_manager.settings.telegram_auto_harvest
+            if recommendation_manager
+            else False
+        ),
+        harvest_after_scrape=(
+            recommendation_manager.settings.telegram_harvest_after_scrape
+            if recommendation_manager
+            else False
+        ),
     )
 
 
@@ -947,6 +967,16 @@ def _run_recommended_scrape(
         db_path=db_config.get("path"),
         database=database,
         recommendation_manager=recommendation_manager,
+        auto_harvest_recommendations=(
+            recommendation_manager.settings.telegram_auto_harvest
+            if recommendation_manager
+            else False
+        ),
+        harvest_after_scrape=(
+            recommendation_manager.settings.telegram_harvest_after_scrape
+            if recommendation_manager
+            else False
+        ),
     )
 
     for recommendation in recommendations:
@@ -957,6 +987,116 @@ def _run_recommended_scrape(
         )
 
     print("\n✅ Scraping complete! Review new data through the database management menu.")
+
+
+def harvest_telegram_recommendations_cli(
+    recommendation_manager: RecommendationManager,
+    api_id: int,
+    api_hash: str,
+) -> None:
+    """Interactive handler for Telegram's native channel recommendations."""
+
+    if not recommendation_manager or not recommendation_manager.db:
+        print("Recommendation system is unavailable.")
+        return
+
+    settings = recommendation_manager.settings
+
+    print("\n" + "=" * 60)
+    print("HARVEST TELEGRAM CHANNEL RECOMMENDATIONS")
+    print("=" * 60)
+    print(
+        "\nThis queries Telegram for channels similar to your best coordinate sources."
+    )
+
+    default_density = settings.telegram_min_source_density
+    min_density_input = prompt_validated(
+        f"Minimum coordinate density for source channels [default: {default_density:.1f}%]: ",
+        _validate_percentage,
+        error_msg="Please enter a valid percentage",
+        allow_empty=True,
+        empty_value=f"{default_density:.1f}",
+    )
+    min_density = float(min_density_input)
+
+    default_limit = settings.telegram_max_source_channels
+    limit_prompt = "Maximum source channels to query [default: all]: "
+    if default_limit:
+        limit_prompt = (
+            f"Maximum source channels to query [default: {default_limit}]: "
+        )
+
+    max_channels_input = prompt_validated(
+        limit_prompt,
+        validate_positive_int,
+        error_msg="Please enter a positive integer",
+        allow_empty=True,
+        empty_value=str(default_limit) if default_limit else "",
+    )
+    max_channels = (
+        int(max_channels_input)
+        if max_channels_input
+        else default_limit if default_limit else None
+    )
+
+    sources = recommendation_manager.db.get_channels_with_coordinates(
+        min_density=min_density,
+        limit=max_channels,
+    )
+
+    if not sources:
+        print(
+            f"\n❌ No channels found with coordinate density >= {min_density:.1f}%"
+        )
+        print("   Try lowering the minimum density threshold.")
+        return
+
+    print(f"\n📊 Will query {len(sources)} source channel(s):")
+    preview = sources[:5]
+    for idx, source in enumerate(preview, 1):
+        name = source.get("title") or source.get("username") or f"ID:{source['id']}"
+        density = float(source.get("coordinate_density") or 0.0)
+        print(f"   {idx}. {name} ({density:.1f}% coordinate density)")
+    if len(sources) > len(preview):
+        print(f"   ... and {len(sources) - len(preview)} more")
+
+    estimate_low = len(sources) * 2
+    estimate_high = len(sources) * 5
+    print(
+        f"\n⏱️  Estimated time: {estimate_low} - {estimate_high} seconds"
+    )
+    print("   (Telegram rate limits may add extra delay)")
+
+    confirm = input("\nProceed with harvest? (y/N): ").strip().lower()
+    if confirm != "y":
+        print("Cancelled.")
+        return
+
+    session_name = os.environ.get("TELEGRAM_SESSION_NAME", "recommendation_harvest")
+
+    async def run_harvest() -> Dict[str, Any]:
+        async with TelegramClient(session_name, api_id, api_hash) as client:
+            return await recommendation_manager.harvest_telegram_recommendations(
+                client,
+                min_coordinate_density=min_density,
+                max_source_channels=max_channels,
+            )
+
+    try:
+        stats = asyncio.run(run_harvest())
+    except (RPCError, ValueError, OSError) as exc:
+        LOGGER.error("Failed to harvest Telegram recommendations: %s", exc)
+        print(f"\n❌ Harvest failed: {exc}")
+        return
+
+    if stats.get("new_recommendations", 0):
+        print("\n✨ Success! New recommendations are ready to review.")
+        print("   Select option 1 or 2 to view them.")
+    else:
+        print("\n📝 No new recommendations found.")
+        print(
+            "   All suggested channels are either already tracked or previously discovered."
+        )
 
 
 def display_recommendation_menu() -> None:
@@ -971,7 +1111,8 @@ def display_recommendation_menu() -> None:
     print("  6. Enrich recommendations (fetch channel details)")
     print("  7. Export recommendations to CSV")
     print("  8. View forward analysis")
-    print("  9. Back to main menu")
+    print("  9. Harvest Telegram API recommendations (NEW)")
+    print(" 10. Back to main menu")
     print()
 
 
@@ -979,9 +1120,9 @@ def get_recommendation_choice() -> str:
     """Return a validated menu selection for recommendation management."""
 
     return prompt_validated(
-        "Enter choice (1-9): ",
-        lambda value: value in {str(i) for i in range(1, 10)},
-        error_msg="Please select an option between 1 and 9.",
+        "Enter choice (1-10): ",
+        lambda value: value in {str(i) for i in range(1, 11)},
+        error_msg="Please select an option between 1 and 10.",
     )
 
 
@@ -1014,7 +1155,7 @@ def execute_recommendation_action(
     Returns ``False`` when the caller should exit the menu.
     """
 
-    if choice == "9":
+    if choice == "10":
         LOGGER.debug("Exiting recommendation management menu")
         return False
 
@@ -1033,6 +1174,11 @@ def execute_recommendation_action(
         "6": lambda: enrich_recommendations_cli(recommendation_manager, api_id, api_hash),
         "7": lambda: export_recommendations_cli(recommendation_manager),
         "8": lambda: view_forward_analysis(recommendation_manager),
+        "9": lambda: harvest_telegram_recommendations_cli(
+            recommendation_manager,
+            api_id,
+            api_hash,
+        ),
     }
 
     handler = handlers.get(choice)
@@ -1381,6 +1527,16 @@ def handle_scan_known_channels(
         db_path=db_config.get("path"),
         database=database,
         recommendation_manager=recommendation_manager,
+        auto_harvest_recommendations=(
+            recommendation_manager.settings.telegram_auto_harvest
+            if recommendation_manager
+            else False
+        ),
+        harvest_after_scrape=(
+            recommendation_manager.settings.telegram_harvest_after_scrape
+            if recommendation_manager
+            else False
+        ),
     )
 
     print("Scan complete. Updated data is available in the database.")
