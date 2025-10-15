@@ -27,6 +27,7 @@ except ImportError as exc:  # pragma: no cover - missing dependency is fatal
 
 DEFAULT_GEO_KEYWORDS = [
     "geolocation",
+    "geoloc",
     "geo-location",
     "geolocated",
     "geolocate",
