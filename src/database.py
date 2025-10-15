@@ -246,6 +246,8 @@ class CoordinatesDatabase:
                 for statement in schema_statements:
                     connection.execute(statement)
 
+                self._ensure_recommended_channels_schema(connection)
+
             config = Config()
             if config.database_wal_mode:
                 connection.execute("PRAGMA journal_mode = WAL")
@@ -264,6 +266,44 @@ class CoordinatesDatabase:
             LOGGER.error("Failed to initialise database schema: %s", error)
             return False
         return True
+
+    # ------------------------------------------------------------------
+    # Schema migration helpers
+    def _ensure_recommended_channels_schema(self, connection: sqlite3.Connection) -> None:
+        """Add legacy columns required for recommendation tracking if missing."""
+
+        try:
+            columns_info = connection.execute("PRAGMA table_info(recommended_channels)").fetchall()
+        except sqlite3.DatabaseError as exc:  # pragma: no cover - defensive
+            LOGGER.error("Unable to inspect recommended_channels schema: %s", exc)
+            raise
+
+        existing_columns = {row[1] for row in columns_info}
+        migrations = {
+            "entity_type": "ALTER TABLE recommended_channels ADD COLUMN entity_type TEXT",
+            "discovery_method": "ALTER TABLE recommended_channels ADD COLUMN discovery_method TEXT DEFAULT 'forward'",
+            "telegram_recommendation_count": "ALTER TABLE recommended_channels ADD COLUMN telegram_recommendation_count INTEGER DEFAULT 0",
+            "telegram_rec_source_density": "ALTER TABLE recommended_channels ADD COLUMN telegram_rec_source_density REAL DEFAULT 0.0",
+            "last_harvest_date": "ALTER TABLE recommended_channels ADD COLUMN last_harvest_date DATETIME",
+        }
+
+        for column_name, statement in migrations.items():
+            if column_name in existing_columns:
+                continue
+
+            try:
+                connection.execute(statement)
+                LOGGER.info(
+                    "Added missing column %s to recommended_channels table", column_name
+                )
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" in str(exc).lower():
+                    LOGGER.debug(
+                        "Column %s already exists on recommended_channels (detected during migration)",
+                        column_name,
+                    )
+                    continue
+                raise
 
     def close(self) -> None:
         """Close the active SQLite connection."""
