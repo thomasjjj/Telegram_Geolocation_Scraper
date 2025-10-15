@@ -27,6 +27,9 @@ if TYPE_CHECKING:  # pragma: no cover - optional dependency for type checking
 LOGGER = logging.getLogger(__name__)
 
 
+COORDINATE_BATCH_SIZE = 100
+
+
 @dataclass
 class ScrapeStats:
     """Aggregated information about a scraping run for a single channel."""
@@ -192,7 +195,7 @@ async def scrape_channel(
 
                     if database and row_id:
                         coordinate_batch.append((row_id, lat_value, lon_value))
-                        if len(coordinate_batch) >= 100:
+                        if len(coordinate_batch) >= COORDINATE_BATCH_SIZE:
                             database.bulk_add_coordinates(coordinate_batch)
                             coordinate_batch.clear()
 
