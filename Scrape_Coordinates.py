@@ -5,11 +5,13 @@ This module provides a simplified API for scraping coordinates from Telegram cha
 based on the contribution by tom-bullock.
 """
 
-import asyncio
 import datetime
 import logging
 import os
 import re
+from pathlib import Path
+
+from dotenv import load_dotenv, set_key
 from telethon import TelegramClient
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 import pandas as pd
@@ -228,67 +230,6 @@ def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_has
     return df
 
 
-def _build_arg_parser():
-    """Create the argument parser used for the CLI entry point."""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Scrape Telegram channels for coordinate pairs and export them to CSV.")
-    parser.add_argument(
-        "channels",
-        nargs="+",
-        help="One or more Telegram channel usernames or IDs to scrape.")
-    parser.add_argument(
-        "--date-limit",
-        required=True,
-        help="Only process messages newer than this YYYY-MM-DD date.")
-    parser.add_argument(
-        "--output",
-        required=True,
-        help="Path where the resulting CSV file should be written.")
-    parser.add_argument(
-        "--api-id",
-        type=int,
-        default=None,
-        help="Telegram API ID. Overrides the TELEGRAM_API_ID environment variable if provided.")
-    parser.add_argument(
-        "--api-hash",
-        default=None,
-        help="Telegram API hash. Overrides the TELEGRAM_API_HASH environment variable if provided.")
-    parser.add_argument(
-        "--session-name",
-        default="simple_scraper",
-        help="Name of the local Telethon session file to use (default: %(default)s).")
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
-        help="Logging level for the scraper output (default: %(default)s).")
-    parser.add_argument(
-        "--export-kml",
-        action="store_true",
-        help="Also export results to a KML file using the CSV output path with a .kml extension.")
-    parser.add_argument(
-        "--export-kmz",
-        action="store_true",
-        help="Also export results to a KMZ file using the CSV output path with a .kmz extension.")
-    parser.add_argument(
-        "--kml-output",
-        default=None,
-        help="Custom path for the generated KML file. Overrides --export-kml default path.")
-    parser.add_argument(
-        "--kmz-output",
-        default=None,
-        help="Custom path for the generated KMZ file. Overrides --export-kmz default path.")
-    return parser
-
-
-def _configure_logging(level):
-    """Configure basic logging for the CLI."""
-    numeric_level = getattr(logging, level.upper(), logging.INFO)
-    logging.basicConfig(level=numeric_level, format="%(levelname)s: %(message)s")
-
-
 def _derive_output_path(base_path, new_extension):
     """Generate an additional output path by swapping the file extension."""
 
@@ -301,27 +242,77 @@ def _derive_output_path(base_path, new_extension):
 
 
 if __name__ == "__main__":
-    parser = _build_arg_parser()
-    args = parser.parse_args()
+    # Load environment variables from .env if available
+    env_path = Path(__file__).resolve().parent / ".env"
+    load_dotenv(dotenv_path=env_path)
 
-    _configure_logging(args.log_level)
+    if not env_path.exists():
+        env_path.touch()
 
-    kml_output_path = args.kml_output
-    if args.export_kml and not kml_output_path:
-        kml_output_path = _derive_output_path(args.output, ".kml")
+    # Configure logging interactively
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    kmz_output_path = args.kmz_output
-    if args.export_kmz and not kmz_output_path:
-        kmz_output_path = _derive_output_path(args.output, ".kmz")
+    api_id = os.environ.get("TELEGRAM_API_ID")
+    if not api_id:
+        api_id = input("Enter your Telegram API ID: ").strip()
+        while not api_id.isdigit():
+            print("API ID must be numeric.")
+            api_id = input("Enter your Telegram API ID: ").strip()
+        set_key(str(env_path), "TELEGRAM_API_ID", api_id)
+        print("Saved API ID to .env")
+    os.environ["TELEGRAM_API_ID"] = api_id
 
-    # Invoke the scraper with CLI-provided arguments
+    api_hash = os.environ.get("TELEGRAM_API_HASH")
+    if not api_hash:
+        api_hash = input("Enter your Telegram API hash: ").strip()
+        while not api_hash:
+            print("API hash cannot be empty.")
+            api_hash = input("Enter your Telegram API hash: ").strip()
+        set_key(str(env_path), "TELEGRAM_API_HASH", api_hash)
+        print("Saved API hash to .env")
+    os.environ["TELEGRAM_API_HASH"] = api_hash
+
+    channels_input = input("Enter Telegram channel usernames or IDs (comma separated): ").strip()
+    while not channels_input:
+        print("At least one channel is required.")
+        channels_input = input("Enter Telegram channel usernames or IDs (comma separated): ").strip()
+    channels = [channel.strip() for channel in channels_input.split(",") if channel.strip()]
+
+    date_limit = input("Enter the date limit (YYYY-MM-DD): ").strip()
+    while True:
+        try:
+            datetime.datetime.strptime(date_limit, "%Y-%m-%d")
+            break
+        except ValueError:
+            print("Invalid date format. Please use YYYY-MM-DD.")
+            date_limit = input("Enter the date limit (YYYY-MM-DD): ").strip()
+
+    output_path = input("Enter the output CSV path: ").strip()
+    while not output_path:
+        print("Output path cannot be empty.")
+        output_path = input("Enter the output CSV path: ").strip()
+
+    session_name = input("Enter the session name (press Enter for default 'simple_scraper'): ").strip() or "simple_scraper"
+
+    export_kml = input("Export to KML as well? (y/N): ").strip().lower() == "y"
+    kml_output_path = None
+    if export_kml:
+        custom_kml_path = input("Enter KML output path (press Enter to use CSV path with .kml): ").strip()
+        kml_output_path = custom_kml_path or _derive_output_path(output_path, ".kml")
+
+    export_kmz = input("Export to KMZ as well? (y/N): ").strip().lower() == "y"
+    kmz_output_path = None
+    if export_kmz:
+        custom_kmz_path = input("Enter KMZ output path (press Enter to use CSV path with .kmz): ").strip()
+        kmz_output_path = custom_kmz_path or _derive_output_path(output_path, ".kmz")
+
     channel_scraper(
-        channel_links=args.channels,
-        date_limit=args.date_limit,
-        output_path=args.output,
-        api_id=args.api_id,
-        api_hash=args.api_hash,
-        session_name=args.session_name,
+        channel_links=channels,
+        date_limit=date_limit,
+        output_path=output_path,
+        api_id=int(os.environ["TELEGRAM_API_ID"]),
+        api_hash=os.environ["TELEGRAM_API_HASH"],
+        session_name=session_name,
         kml_output_path=kml_output_path,
         kmz_output_path=kmz_output_path,
     )
