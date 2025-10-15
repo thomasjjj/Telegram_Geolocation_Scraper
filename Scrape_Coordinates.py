@@ -117,6 +117,12 @@ def get_default_session_name() -> str:
     return os.environ.get("TELEGRAM_SESSION_NAME", "simple_scraper")
 
 
+def first_time_setup() -> bool:
+    session_name = os.getenv("TELEGRAM_SESSION_NAME", get_default_session_name())
+    session_file = Path(f"{session_name}.session")
+    return not session_file.exists()
+
+
 def prompt_session_name() -> str:
     default_session = get_default_session_name()
     session_name = (
@@ -150,6 +156,64 @@ async def ensure_telegram_authentication(api_id: int, api_hash: str, session_nam
             print("Authentication successful.")
     finally:
         await client.disconnect()
+
+
+def setup_wizard(env_path: Path) -> tuple[int, str, str]:
+    """Guide first-time users through the essential configuration steps."""
+
+    print("Step 1/3: Connect your Telegram account")
+    api_id, api_hash = ensure_api_credentials(env_path)
+
+    print("\nStep 2/3: Choose where to store your login session")
+    session_name = prompt_session_name()
+
+    print("\nStep 3/3: Configure how results are stored")
+    db_config = get_database_configuration()
+
+    default_enabled = db_config["enabled"]
+    while True:
+        enable_prompt = "Enable the built-in database for saving results? [Y/n]: "
+        response = input(enable_prompt).strip().lower()
+        if response in {"", "y", "yes"}:
+            enable_database = True
+            break
+        if response in {"n", "no"}:
+            enable_database = False
+            break
+        print("Please respond with 'y' or 'n'.")
+
+    os.environ["DATABASE_ENABLED"] = "true" if enable_database else "false"
+    set_key(str(env_path), "DATABASE_ENABLED", os.environ["DATABASE_ENABLED"])
+
+    if enable_database:
+        default_path = db_config["path"]
+        database_path = input(
+            f"Where should the database be stored? [{default_path}]: "
+        ).strip() or default_path
+        os.environ["DATABASE_PATH"] = database_path
+        set_key(str(env_path), "DATABASE_PATH", database_path)
+
+        default_skip = "Y" if db_config["skip_existing"] else "N"
+        skip_existing_prompt = (
+            "Skip messages that were already processed in previous runs? "
+            f"[{default_skip}/n]: "
+        )
+        skip_response = input(skip_existing_prompt).strip().lower()
+        if skip_response in {"n", "no"}:
+            skip_existing = False
+        elif skip_response in {"", "y", "yes"}:
+            skip_existing = True
+        else:
+            skip_existing = db_config["skip_existing"]
+
+        os.environ["DATABASE_SKIP_EXISTING"] = "true" if skip_existing else "false"
+        set_key(str(env_path), "DATABASE_SKIP_EXISTING", os.environ["DATABASE_SKIP_EXISTING"])
+
+    print(
+        "\n✅ Quick start complete! We'll now connect to Telegram to finish authentication.\n"
+    )
+
+    return api_id, api_hash, session_name
 
 
 async def _search_dialogs_for_keywords(
@@ -1030,9 +1094,14 @@ def main() -> None:
     configure_logging()
     env_path = Path(__file__).resolve().parent / ".env"
     load_environment(env_path)
-    api_id, api_hash = ensure_api_credentials(env_path)
 
-    session_name = prompt_session_name()
+    if first_time_setup():
+        print("👋 Welcome! Let's get you set up in 3 steps...\n")
+        api_id, api_hash, session_name = setup_wizard(env_path)
+    else:
+        api_id, api_hash = ensure_api_credentials(env_path)
+        session_name = prompt_session_name()
+
     asyncio.run(ensure_telegram_authentication(api_id, api_hash, session_name))
 
     db_config = get_database_configuration()
