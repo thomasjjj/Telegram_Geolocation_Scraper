@@ -358,7 +358,15 @@ if __name__ == "__main__":
         print("Saved API hash to .env")
     os.environ["TELEGRAM_API_HASH"] = api_hash
 
-    session_name = input("Enter the session name (press Enter for default 'simple_scraper'): ").strip() or "simple_scraper"
+    session_name = os.environ.get("TELEGRAM_SESSION_NAME")
+    if not session_name:
+        session_name = input("Enter the session name (press Enter for default 'simple_scraper'): ").strip() or "simple_scraper"
+        set_key(str(env_path), "TELEGRAM_SESSION_NAME", session_name)
+        print("Saved session name to .env")
+    else:
+        print(f"Using session name '{session_name}' from .env")
+
+    os.environ["TELEGRAM_SESSION_NAME"] = session_name
 
     prompt = (
         "Enter Telegram channel usernames or IDs (comma separated) "
