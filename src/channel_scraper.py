@@ -9,6 +9,7 @@ import os
 import re
 from pathlib import Path
 from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING, Union
 
 import pandas as pd
@@ -38,7 +39,85 @@ class ScrapeStats:
     coordinates_found: int = 0
 
 
-def _determine_channel_type(entity: Union[Channel, Chat]) -> str:
+class CoordinateResultCollector:
+    """Utility to buffer coordinate records and optionally stream them to CSV."""
+
+    COLUMNS = [
+        "message_id",
+        "message_content",
+        "message_media_type",
+        "message_published_at",
+        "message_source",
+        "latitude",
+        "longitude",
+    ]
+
+    def __init__(
+        self,
+        output_path: str | None = None,
+        *,
+        batch_size: int = 5000,
+        collect_in_memory: bool = True,
+    ) -> None:
+        self.output_path = output_path
+        self.batch_size = max(1, batch_size)
+        self.collect_in_memory = collect_in_memory
+        self._buffer: List[Dict[str, Any]] = []
+        self._frames: List[pd.DataFrame] = []
+        self._csv_header_written = False
+        self.total_records = 0
+
+    def add_record(self, record: Dict[str, Any]) -> None:
+        """Append a coordinate record and flush when the batch is full."""
+
+        self._buffer.append(record)
+        self.total_records += 1
+        if len(self._buffer) >= self.batch_size:
+            self._flush()
+
+    def _flush(self) -> None:
+        if not self._buffer:
+            return
+
+        df = pd.DataFrame(self._buffer, columns=self.COLUMNS)
+
+        if self.output_path:
+            os.makedirs(os.path.dirname(self.output_path) or ".", exist_ok=True)
+            df.to_csv(
+                self.output_path,
+                mode="a" if self._csv_header_written else "w",
+                header=not self._csv_header_written,
+                index=False,
+            )
+            self._csv_header_written = True
+
+        if self.collect_in_memory:
+            self._frames.append(df)
+
+        self._buffer.clear()
+
+    def finalize(self) -> pd.DataFrame:
+        """Flush remaining data and return the concatenated DataFrame."""
+
+        self._flush()
+
+        if self.collect_in_memory:
+            if not self._frames:
+                return pd.DataFrame(columns=self.COLUMNS)
+            df = pd.concat(self._frames, ignore_index=True)
+            self._frames.clear()
+            return df
+
+        return pd.DataFrame(columns=self.COLUMNS)
+
+    @property
+    def csv_written(self) -> bool:
+        """Return whether any data has been written to the CSV output."""
+
+        return self._csv_header_written
+
+
+def _determine_channel_type(entity: Channel | Chat) -> str:
     if isinstance(entity, Channel):
         if getattr(entity, "megagroup", False):
             return "supergroup"
@@ -53,18 +132,15 @@ async def scrape_channel(
     coordinate_pattern: Optional[re.Pattern] = None,
     database: Optional[CoordinatesDatabase] = None,
     skip_existing: bool = True,
-    recommendation_manager: Optional["RecommendationManager"] = None,
-    entity_cache: Optional[EntityCache] = None,
-) -> Tuple[List[int], List[str], List[str], List[str], List[str], List[float], List[float], ScrapeStats]:
-    """Scrape a single channel for coordinates with optional database integration."""
+    recommendation_manager: "RecommendationManager" | None = None,
+    entity_cache: EntityCache | None = None,
+    result_collector: CoordinateResultCollector | None = None,
+) -> ScrapeStats:
+    """Scrape a single channel for coordinates with optional database integration.
 
-    message_ids: List[int] = []
-    message_texts: List[str] = []
-    media_types: List[str] = []
-    dates: List[str] = []
-    sources: List[str] = []
-    latitudes: List[float] = []
-    longitudes: List[float] = []
+    When ``result_collector`` is provided, coordinate rows are streamed to it in
+    batches to avoid building large in-memory lists.
+    """
 
     if coordinate_pattern is None:
         coordinate_pattern = re.compile(r"(-?\d+\.\d+),\s*(-?\d+\.\d+)")
@@ -170,14 +246,18 @@ async def scrape_channel(
                     lat_value = float(latitude)
                     lon_value = float(longitude)
 
-                    # Append metadata for each coordinate
-                    message_ids.append(message.id)
-                    message_texts.append(message_text)
-                    media_types.append(media_type)
-                    dates.append(message_date or "")
-                    sources.append(source)
-                    latitudes.append(lat_value)
-                    longitudes.append(lon_value)
+                    if result_collector:
+                        result_collector.add_record(
+                            {
+                                "message_id": message.id,
+                                "message_content": message_text,
+                                "message_media_type": media_type,
+                                "message_published_at": message_date or "",
+                                "message_source": source,
+                                "latitude": lat_value,
+                                "longitude": lon_value,
+                            }
+                        )
 
                     stats.coordinates_found += 1
 
@@ -225,16 +305,7 @@ async def scrape_channel(
     except Exception as error:  # pragma: no cover - Telethon errors hard to simulate in tests
         LOGGER.error("Error scraping channel %s: %s", channel_id, error)
 
-    return (
-        message_ids,
-        message_texts,
-        media_types,
-        dates,
-        sources,
-        latitudes,
-        longitudes,
-        stats,
-    )
+    return stats
 
 
 def _ensure_sequence(value: Union[Sequence[str], str]) -> Sequence[str]:
@@ -259,12 +330,15 @@ def channel_scraper(
     recommendation_manager: Optional["RecommendationManager"] = None,
     auto_visualize: bool = False,
     visualization_type: str = "auto",
+    batch_size: int = 5000,
+    collect_results: bool = True,
 ) -> pd.DataFrame:
     """Scrape Telegram channels for coordinates and optionally export the results.
 
-    When *output_path* is provided the collected coordinates are written to that
-    CSV file. Otherwise the information is only persisted to the configured
-    database (if enabled).
+    When *output_path* is provided the collected coordinates are streamed to that
+    CSV file in batches instead of being accumulated entirely in memory. Set
+    *collect_results* to ``False`` to skip building the return DataFrame when the
+    CSV or database outputs are sufficient.
     """
 
     parsed_date_limit: Optional[datetime.datetime] = None
@@ -294,13 +368,18 @@ def channel_scraper(
 
     channel_list = list(_ensure_sequence(channel_links))
 
-    message_ids: List[int] = []
-    message_texts: List[str] = []
-    media_types: List[str] = []
-    dates: List[str] = []
-    sources: List[str] = []
-    latitudes: List[float] = []
-    longitudes: List[float] = []
+    requires_dataframe = bool(kml_output_path or kmz_output_path or auto_visualize)
+    if requires_dataframe and not collect_results:
+        LOGGER.warning(
+            "Data collection is required for KML/KMZ export or auto-visualisation; enabling in-memory collection."
+        )
+        collect_results = True
+
+    result_collector = CoordinateResultCollector(
+        output_path,
+        batch_size=batch_size,
+        collect_in_memory=collect_results,
+    )
 
     database_instance: Optional[CoordinatesDatabase] = None
     if use_database:
@@ -318,7 +397,7 @@ def channel_scraper(
             try:
                 for idx, channel in enumerate(channel_list, start=1):
                     LOGGER.info("[%s/%s] Scraping channel: %s", idx, len(channel_list), channel)
-                    result = await scrape_channel(
+                    stats = await scrape_channel(
                         client,
                         channel,
                         parsed_date_limit,
@@ -327,9 +406,9 @@ def channel_scraper(
                         skip_existing=skip_existing,
                         recommendation_manager=recommendation_manager,
                         entity_cache=entity_cache,
+                        result_collector=result_collector,
                     )
 
-                    stats = result[-1]
                     LOGGER.info(
                         "Channel %s processed=%s inserted=%s skipped=%s coordinates=%s",
                         stats.channel_id,
@@ -342,13 +421,6 @@ def channel_scraper(
                     total_new += stats.messages_inserted
                     total_coords += stats.coordinates_found
 
-                    message_ids.extend(result[0])
-                    message_texts.extend(result[1])
-                    media_types.extend(result[2])
-                    dates.extend(result[3])
-                    sources.extend(result[4])
-                    latitudes.extend(result[5])
-                    longitudes.extend(result[6])
             finally:
                 if database_instance and session_id:
                     database_instance.end_session(
@@ -364,24 +436,14 @@ def channel_scraper(
 
     asyncio.run(runner())
 
-    df = pd.DataFrame(
-        {
-            "message_id": message_ids,
-            "message_content": message_texts,
-            "message_media_type": media_types,
-            "message_published_at": dates,
-            "message_source": sources,
-            "latitude": latitudes,
-            "longitude": longitudes,
-        }
-    )
+    df = result_collector.finalize()
+
+    if output_path and result_collector.csv_written:
+        LOGGER.info(
+            "Successfully saved %s coordinates to %s", result_collector.total_records, output_path
+        )
 
     if not df.empty:
-        if output_path:
-            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-            df.to_csv(output_path, index=False)
-            LOGGER.info("Successfully saved %s coordinates to %s", len(df), output_path)
-
         if kml_output_path:
             if save_dataframe_to_kml(df, kml_output_path):
                 LOGGER.info("Successfully saved KML to %s", kml_output_path)
@@ -412,6 +474,11 @@ def channel_scraper(
                     LOGGER.info("Interactive map generated at %s", map_output)
                 except Exception as exc:  # pragma: no cover - best-effort visualisation
                     LOGGER.warning("Failed to create interactive map: %s", exc)
+    elif result_collector.total_records:
+        LOGGER.info(
+            "Collected %s coordinates (results were streamed directly to disk)",
+            result_collector.total_records,
+        )
     else:
         LOGGER.info("No coordinates found.")
 
