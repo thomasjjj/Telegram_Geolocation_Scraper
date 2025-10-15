@@ -102,6 +102,8 @@ async def scrape_channel(
         if latest_message_id and skip_existing:
             iter_kwargs["min_id"] = latest_message_id
 
+        coordinate_batch: List[Tuple[int, float, float]] = []
+
         async for message in client.iter_messages(entity, **iter_kwargs):
             stats.messages_processed += 1
             if not message or not message.message:
@@ -185,13 +187,10 @@ async def scrape_channel(
                     )
 
                     if database and row_id:
-                        database.add_coordinate(
-                            row_id,
-                            lat_value,
-                            lon_value,
-                            coordinate_format="decimal",
-                            extraction_confidence="high",
-                        )
+                        coordinate_batch.append((row_id, lat_value, lon_value))
+                        if len(coordinate_batch) >= 100:
+                            database.bulk_add_coordinates(coordinate_batch)
+                            coordinate_batch.clear()
 
             if database and row_id:
                 # Update message flag if coordinates were found
@@ -212,6 +211,10 @@ async def scrape_channel(
                     )
                 except Exception as exc:  # pragma: no cover - defensive logging
                     LOGGER.debug("Recommendation processing failed for message %s: %s", message.id, exc)
+
+        if database and coordinate_batch:
+            database.bulk_add_coordinates(coordinate_batch)
+            coordinate_batch.clear()
 
         if database:
             database.update_channel_statistics(resolved_channel_id)
