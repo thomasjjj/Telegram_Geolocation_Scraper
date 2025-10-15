@@ -17,6 +17,7 @@ from telethon.tl.types import Channel, Chat, MessageMediaDocument, MessageMediaP
 from src.coordinates import extract_coordinates
 from src.database import CoordinatesDatabase
 from src.export import save_dataframe_to_kml, save_dataframe_to_kmz
+from src.entity_cache import EntityCache
 
 if TYPE_CHECKING:  # pragma: no cover - optional dependency for type checking
     from src.recommendations import RecommendationManager
@@ -52,6 +53,7 @@ async def scrape_channel(
     database: Optional[CoordinatesDatabase] = None,
     skip_existing: bool = True,
     recommendation_manager: "RecommendationManager" | None = None,
+    entity_cache: EntityCache | None = None,
 ) -> Tuple[List[int], List[str], List[str], List[str], List[str], List[float], List[float], ScrapeStats]:
     """Scrape a single channel for coordinates with optional database integration."""
 
@@ -69,7 +71,8 @@ async def scrape_channel(
     stats = ScrapeStats(channel_id=0)
 
     try:
-        entity = await client.get_entity(channel_id)
+        cache = entity_cache or EntityCache(client, database)
+        entity = await cache.get_entity(channel_id)
         resolved_channel_id = getattr(entity, "id", channel_id)
         channel_display_name = (
             getattr(entity, "title", None)
@@ -306,6 +309,7 @@ def channel_scraper(
                 session_type = "single_channel" if len(channel_list) == 1 else "multi_channel"
                 session_id = database_instance.start_session(session_type)
             total_skipped = total_new = total_coords = 0
+            entity_cache = EntityCache(client, database_instance)
             try:
                 for idx, channel in enumerate(channel_list, start=1):
                     LOGGER.info("[%s/%s] Scraping channel: %s", idx, len(channel_list), channel)
@@ -317,6 +321,7 @@ def channel_scraper(
                         database=database_instance,
                         skip_existing=skip_existing,
                         recommendation_manager=recommendation_manager,
+                        entity_cache=entity_cache,
                     )
 
                     stats = result[-1]

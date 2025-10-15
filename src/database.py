@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from telethon.extensions import BinaryReader
+
 import pandas as pd
 
 
@@ -194,6 +196,19 @@ class CoordinatesDatabase:
             "CREATE INDEX IF NOT EXISTS idx_forwards_to ON channel_forwards(to_channel_id)",
             "CREATE INDEX IF NOT EXISTS idx_forwards_coordinates ON channel_forwards(had_coordinates)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_forwards_unique ON channel_forwards(message_ref, from_channel_id, to_channel_id)",
+            """
+            CREATE TABLE IF NOT EXISTS entity_cache (
+                identifier TEXT PRIMARY KEY,
+                entity_bytes BLOB NOT NULL,
+                entity_type TEXT,
+                channel_id INTEGER,
+                access_hash INTEGER,
+                username TEXT,
+                title TEXT,
+                stored_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_used DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
         ]
 
         connection = self.connect()
@@ -457,6 +472,95 @@ class CoordinatesDatabase:
             params.append(limit)
         cursor = self.connect().execute(sql, params)
         return [dict(row) for row in cursor.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Entity cache helpers
+    def cache_entity(self, identifier: str, entity: Any) -> bool:
+        """Persist a Telethon entity for reuse across scraping runs."""
+
+        if not identifier or entity is None:
+            return False
+
+        identifier = str(identifier)
+
+        try:
+            entity_bytes = bytes(entity.to_bytes())
+        except Exception as error:  # pragma: no cover - defensive
+            LOGGER.debug("Failed to serialise entity %s: %s", identifier, error)
+            return False
+
+        metadata = {
+            "entity_type": type(entity).__name__,
+            "channel_id": getattr(entity, "id", None),
+            "access_hash": getattr(entity, "access_hash", None),
+            "username": getattr(entity, "username", None),
+            "title": getattr(entity, "title", getattr(entity, "name", None)),
+        }
+
+        connection = self.connect()
+        try:
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO entity_cache (identifier, entity_bytes, entity_type, channel_id, access_hash, username, title)
+                    VALUES (:identifier, :entity_bytes, :entity_type, :channel_id, :access_hash, :username, :title)
+                    ON CONFLICT(identifier) DO UPDATE SET
+                        entity_bytes=excluded.entity_bytes,
+                        entity_type=excluded.entity_type,
+                        channel_id=excluded.channel_id,
+                        access_hash=excluded.access_hash,
+                        username=excluded.username,
+                        title=excluded.title,
+                        last_used=CURRENT_TIMESTAMP
+                    """,
+                    {
+                        "identifier": identifier,
+                        "entity_bytes": sqlite3.Binary(entity_bytes),
+                        **metadata,
+                    },
+                )
+        except sqlite3.DatabaseError as error:
+            LOGGER.error("Failed to cache entity %s: %s", identifier, error)
+            return False
+        return True
+
+    def get_cached_entity(self, identifier: str) -> Any:
+        """Retrieve a cached Telethon entity from the database if available."""
+
+        if not identifier:
+            return None
+
+        identifier = str(identifier)
+
+        cursor = self.connect().execute(
+            "SELECT entity_bytes FROM entity_cache WHERE identifier=?",
+            (identifier,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        raw_bytes = row["entity_bytes"]
+        if raw_bytes is None:
+            return None
+
+        try:
+            reader = BinaryReader(bytes(raw_bytes))
+            entity = reader.tgread_object()
+        except Exception as error:  # pragma: no cover - defensive
+            LOGGER.debug("Failed to deserialize cached entity %s: %s", identifier, error)
+            return None
+
+        try:
+            with self.connect():
+                self.connect().execute(
+                    "UPDATE entity_cache SET last_used=CURRENT_TIMESTAMP WHERE identifier=?",
+                    (identifier,),
+                )
+        except sqlite3.DatabaseError:  # pragma: no cover - cache hit is best-effort
+            pass
+
+        return entity
 
     def update_channel_statistics(self, channel_id: int) -> bool:
         connection = self.connect()
