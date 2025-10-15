@@ -1735,14 +1735,15 @@ def handle_database_management(database: Optional[CoordinatesDatabase]) -> None:
 4. Vacuum database
 5. Reset database
 6. Import CSV files from results/
-7. Return
+7. View database statistics
+8. Return
 Enter choice: """
 
     while True:
         choice = prompt_validated(
             menu,
-            lambda value: value in {str(i) for i in range(1, 8)},
-            error_msg="Please select an option between 1 and 7.",
+            lambda value: value in {str(i) for i in range(1, 9)},
+            error_msg="Please select an option between 1 and 8.",
         )
         if choice == "1":
             path = input("Enter CSV export path: ").strip() or "results/database_export.csv"
@@ -1785,6 +1786,8 @@ Enter choice: """
             imported = detect_and_migrate_all_results(database=database)
             print(f"Imported {imported} coordinate rows from CSV files.")
         elif choice == "7":
+            handle_database_statistics(database)
+        elif choice == "8":
             break
         else:
             print("Invalid choice. Please try again.")
