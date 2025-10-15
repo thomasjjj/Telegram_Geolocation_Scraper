@@ -735,7 +735,6 @@ def _run_recommended_scrape(
         api_hash: str,
         recommendations: List[RecommendationRecord],
 ) -> None:
-    from telethon.tl.types import PeerChannel
     from telethon import TelegramClient
 
     # First, try to enrich any channels without usernames
@@ -759,16 +758,18 @@ def _run_recommended_scrape(
                 print(f"Enrichment failed: {exc}")
                 print("Continuing with available data...")
 
-    identifiers: List[str | PeerChannel] = []
+    identifiers: List[str] = []
     for recommendation in recommendations:
         username = recommendation.get("username")
         if username:
             # Use username if available (most reliable)
             identifiers.append(username)
         else:
-            # For numeric IDs, create a PeerChannel object
             channel_id = recommendation["channel_id"]
-            identifiers.append(PeerChannel(channel_id))
+            # Telethon expects identifiers that it can resolve via ``get_entity``.
+            # Using a ``PeerChannel`` instance here would require an ``access_hash``,
+            # so fallback to the channel ID string instead.
+            identifiers.append(str(channel_id))
 
     print(f"Preparing to scrape {len(identifiers)} channel(s).")
     LOGGER.info("Scraping %d recommended channels", len(identifiers))
