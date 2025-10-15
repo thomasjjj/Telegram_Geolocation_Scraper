@@ -162,6 +162,7 @@ class CoordinatesDatabase:
                 username TEXT,
                 title TEXT,
                 channel_type TEXT,
+                entity_type TEXT,
                 first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
                 last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
                 discovered_from_channels TEXT,
@@ -905,6 +906,7 @@ class CoordinatesDatabase:
             "username",
             "title",
             "channel_type",
+            "entity_type",
             "first_seen",
             "last_seen",
             "discovered_from_channels",
@@ -965,6 +967,7 @@ class CoordinatesDatabase:
             "username",
             "title",
             "channel_type",
+            "entity_type",
             "first_seen",
             "last_seen",
             "discovered_from_channels",
@@ -1008,6 +1011,68 @@ class CoordinatesDatabase:
             LOGGER.error("Failed to update recommended channel %s: %s", channel_id, error)
             return False
         return True
+
+    def cleanup_invalid_recommendations(self) -> Dict[str, int]:
+        """Remove recommendations that look like user IDs or invalid entities."""
+
+        stats = {
+            "total_before": self.count("recommended_channels"),
+            "removed_by_heuristic": 0,
+            "removed_by_status": 0,
+            "removed_by_type": 0,
+            "total_removed": 0,
+            "total_after": 0,
+        }
+
+        connection = self.connect()
+        removed_ids: Set[int] = set()
+
+        def _select_ids(where: str, params: Sequence[Any]) -> List[int]:
+            rows = connection.execute(
+                f"SELECT channel_id FROM recommended_channels WHERE {where}", params
+            ).fetchall()
+            return [int(row[0]) for row in rows]
+
+        # Remove suspiciously low IDs (likely users)
+        low_id_candidates = _select_ids("channel_id < ?", (1_000_000_000,))
+        if low_id_candidates:
+            with connection:
+                connection.executemany(
+                    "DELETE FROM recommended_channels WHERE channel_id=?",
+                    [(cid,) for cid in low_id_candidates],
+                )
+            stats["removed_by_heuristic"] = len(low_id_candidates)
+            removed_ids.update(low_id_candidates)
+
+        # Remove entries explicitly marked as invalid entity type
+        invalid_status = _select_ids(
+            "user_status = ?", ("invalid_entity_type",)
+        )
+        invalid_status = [cid for cid in invalid_status if cid not in removed_ids]
+        if invalid_status:
+            with connection:
+                connection.executemany(
+                    "DELETE FROM recommended_channels WHERE channel_id=?",
+                    [(cid,) for cid in invalid_status],
+                )
+            stats["removed_by_status"] = len(invalid_status)
+            removed_ids.update(invalid_status)
+
+        # Remove entries recorded as users
+        invalid_type = _select_ids("entity_type = ?", ("user",))
+        invalid_type = [cid for cid in invalid_type if cid not in removed_ids]
+        if invalid_type:
+            with connection:
+                connection.executemany(
+                    "DELETE FROM recommended_channels WHERE channel_id=?",
+                    [(cid,) for cid in invalid_type],
+                )
+            stats["removed_by_type"] = len(invalid_type)
+            removed_ids.update(invalid_type)
+
+        stats["total_removed"] = len(removed_ids)
+        stats["total_after"] = self.count("recommended_channels")
+        return stats
 
     def add_channel_forward(
         self,

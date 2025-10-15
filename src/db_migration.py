@@ -24,6 +24,10 @@ def migrate_schema_for_telegram_recs(db_path: str) -> None:
         migrations = [
             """
             ALTER TABLE recommended_channels
+            ADD COLUMN entity_type TEXT
+            """,
+            """
+            ALTER TABLE recommended_channels
             ADD COLUMN discovery_method TEXT DEFAULT 'forward'
             """,
             """
