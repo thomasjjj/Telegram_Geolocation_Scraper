@@ -68,6 +68,58 @@ class Config:
 
         return os.getenv("DATABASE_SKIP_EXISTING", "true").lower() == "true"
 
+    @property
+    def telegram_fetch_batch_size(self) -> int:
+        """Number of Telegram messages to request per batch."""
+
+        value = os.getenv("TELEGRAM_FETCH_BATCH_SIZE", "100")
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 100
+
+    @property
+    def message_processing_batch_size(self) -> int:
+        """Number of messages to accumulate before database writes."""
+
+        value = os.getenv("MESSAGE_PROCESSING_BATCH_SIZE", "500")
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 500
+
+    @property
+    def coordinate_extraction_parallel(self) -> bool:
+        """Whether coordinate extraction should run in parallel workers."""
+
+        return os.getenv("COORDINATE_EXTRACTION_PARALLEL", "false").lower() == "true"
+
+    @property
+    def coordinate_parallel_workers(self) -> int:
+        """Number of worker processes for coordinate extraction."""
+
+        value = os.getenv("COORDINATE_PARALLEL_WORKERS", "4")
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 4
+
+    @property
+    def database_wal_mode(self) -> bool:
+        """Whether SQLite Write-Ahead Logging should be enabled."""
+
+        return os.getenv("DATABASE_WAL_MODE", "true").lower() == "true"
+
+    @property
+    def database_cache_size_mb(self) -> int:
+        """Return the SQLite cache size in megabytes."""
+
+        value = os.getenv("DATABASE_CACHE_SIZE_MB", "64")
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 64
+
     def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Retrieve an arbitrary configuration value."""
 

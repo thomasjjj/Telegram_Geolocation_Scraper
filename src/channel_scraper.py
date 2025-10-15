@@ -10,14 +10,25 @@ import re
 import sqlite3
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING, Union
+from typing import (
+    Any,
+    AsyncIterator,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    TYPE_CHECKING,
+    Union,
+)
 
 import pandas as pd
 from telethon import TelegramClient
 from telethon.errors import RPCError
 from telethon.tl.types import Channel, Chat, MessageMediaDocument, MessageMediaPhoto
 
+from src.config import Config
 from src.coordinates import extract_coordinates
 from src.database import CoordinatesDatabase
 from src.export import save_dataframe_to_kml, save_dataframe_to_kmz
@@ -30,6 +41,11 @@ if TYPE_CHECKING:  # pragma: no cover - optional dependency for type checking
 LOGGER = logging.getLogger(__name__)
 
 
+_CONFIG = Config()
+
+TELEGRAM_FETCH_BATCH_SIZE = _CONFIG.telegram_fetch_batch_size
+MESSAGE_PROCESSING_BATCH_SIZE = _CONFIG.message_processing_batch_size
+MESSAGE_BATCH_LOG_INTERVAL = max(1, int(os.getenv("MESSAGE_BATCH_LOG_INTERVAL", "1000")))
 COORDINATE_BATCH_SIZE = 100
 
 
@@ -130,6 +146,197 @@ def _determine_channel_type(entity: Channel | Chat) -> str:
     return "group"
 
 
+async def fetch_messages_in_batches(
+    client: TelegramClient,
+    entity: Any,
+    *,
+    batch_size: int = TELEGRAM_FETCH_BATCH_SIZE,
+    **iter_kwargs: Any,
+) -> AsyncIterator[List[Any]]:
+    """Yield Telegram messages in batches for efficient downstream processing."""
+
+    batch: List[Any] = []
+
+    async for message in client.iter_messages(entity, **iter_kwargs):
+        if not message:
+            continue
+
+        batch.append(message)
+
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+
+    if batch:
+        yield batch
+
+
+async def _process_message_batch(
+    messages: List[Any],
+    channel_id: int,
+    channel_display_name: str,
+    entity: Any,
+    coordinate_pattern: re.Pattern,
+    database: Optional[CoordinatesDatabase],
+    skip_existing: bool,
+    recommendation_manager: Optional["RecommendationManager"],
+    result_collector: Optional[CoordinateResultCollector],
+) -> Dict[str, int]:
+    """Process a batch of messages using bulk database operations."""
+
+    batch_stats = {"inserted": 0, "skipped": 0, "coordinates": 0}
+
+    if not messages:
+        return batch_stats
+
+    message_ids = [msg.id for msg in messages if getattr(msg, "id", None) is not None]
+    if not message_ids:
+        return batch_stats
+
+    existing_ids: set[int] = set()
+    if database:
+        existing_ids = database.bulk_check_message_existence(channel_id, message_ids)
+        if skip_existing:
+            batch_stats["skipped"] = len(existing_ids)
+
+    if skip_existing and existing_ids:
+        messages_to_process = [msg for msg in messages if msg.id not in existing_ids]
+    else:
+        messages_to_process = list(messages)
+
+    if not messages_to_process:
+        return batch_stats
+
+    messages_to_insert: List[Dict[str, Any]] = []
+    coordinate_records: List[Dict[str, Any]] = []
+    messages_with_coords: List[int] = []
+
+    channel_username = getattr(entity, "username", None)
+
+    for message in messages_to_process:
+        if not getattr(message, "message", None):
+            continue
+
+        message_text = str(message.message)
+
+        matches = coordinate_pattern.findall(message_text)
+        if not matches:
+            extracted = extract_coordinates(message_text)
+            if extracted:
+                matches = [extracted]
+
+        media_type = "text"
+        if message.media:
+            if isinstance(message.media, MessageMediaPhoto):
+                media_type = "photo"
+            elif isinstance(message.media, MessageMediaDocument):
+                media_type = "video/mp4"
+            else:
+                media_type = "other_media"
+
+        has_coordinates = bool(matches)
+        if has_coordinates:
+            messages_with_coords.append(message.id)
+
+        message_record = {
+            "message_id": message.id,
+            "message_text": message_text,
+            "message_date": message.date.isoformat() if message.date else None,
+            "media_type": media_type,
+            "has_coordinates": 1 if has_coordinates else 0,
+        }
+
+        messages_to_insert.append(message_record)
+
+        if has_coordinates:
+            message_date_str = message.date.strftime("%Y-%m-%d") if message.date else None
+            if channel_username:
+                source = f"t.me/{channel_username}/{message.id}"
+            else:
+                source = f"t.me/c/{channel_id}/{message.id}"
+
+            for latitude, longitude in matches:
+                lat_val = float(latitude)
+                lon_val = float(longitude)
+
+                coordinate_records.append(
+                    {
+                        "message_id": message.id,
+                        "latitude": lat_val,
+                        "longitude": lon_val,
+                        "message_text": message_text,
+                        "message_date": message_date_str,
+                        "media_type": media_type,
+                        "source": source,
+                    }
+                )
+                batch_stats["coordinates"] += 1
+
+    if database and messages_to_insert:
+        id_map = database.bulk_insert_messages(channel_id, messages_to_insert)
+        inserted_ids = [mid for mid in id_map if mid not in existing_ids]
+        batch_stats["inserted"] = len(inserted_ids)
+
+        if coordinate_records:
+            coordinate_batch = [
+                (id_map[record["message_id"]], record["latitude"], record["longitude"])
+                for record in coordinate_records
+                if record["message_id"] in id_map
+            ]
+
+            if coordinate_batch:
+                database.bulk_add_coordinates(coordinate_batch)
+
+    else:
+        id_map: Dict[int, int] = {}
+
+    if result_collector and coordinate_records:
+        for record in coordinate_records:
+            result_collector.add_record(
+                {
+                    "message_id": record["message_id"],
+                    "message_content": record["message_text"],
+                    "message_media_type": record["media_type"],
+                    "message_published_at": record["message_date"] or "",
+                    "message_source": record["source"],
+                    "latitude": record["latitude"],
+                    "longitude": record["longitude"],
+                }
+            )
+
+            LOGGER.info(
+                "Retrieved coordinate (%s, %s) from message %s in channel %s",
+                record["latitude"],
+                record["longitude"],
+                record["message_id"],
+                channel_display_name,
+            )
+
+    if recommendation_manager:
+        for message in messages_to_process:
+            if not getattr(message, "forward", None):
+                continue
+
+            row_id = id_map.get(message.id)
+            has_coordinates = message.id in messages_with_coords
+
+            try:
+                recommendation_manager.process_forwarded_message(
+                    message=message,
+                    current_channel_id=channel_id,
+                    has_coordinates=has_coordinates,
+                    message_row_id=row_id,
+                )
+            except (sqlite3.DatabaseError, TypeError, ValueError) as exc:
+                LOGGER.debug(
+                    "Recommendation processing failed for message %s: %s",
+                    message.id,
+                    exc,
+                )
+
+    return batch_stats
+
+
 async def scrape_channel(
     client: TelegramClient,
     channel_id,
@@ -187,122 +394,60 @@ async def scrape_channel(
         if latest_message_id and skip_existing:
             iter_kwargs["min_id"] = latest_message_id
 
-        coordinate_batch: List[Tuple[int, float, float]] = []
+        accumulated_messages: List[Any] = []
 
-        async for message in client.iter_messages(entity, **iter_kwargs):
-            stats.messages_processed += 1
-            if not message or not message.message:
-                continue
+        async for telegram_batch in fetch_messages_in_batches(
+            client,
+            entity,
+            batch_size=TELEGRAM_FETCH_BATCH_SIZE,
+            **iter_kwargs,
+        ):
+            stats.messages_processed += len(telegram_batch)
 
-            existing_entry = False
-            if database and skip_existing:
-                if database.message_exists(resolved_channel_id, message.id):
-                    stats.messages_skipped += 1
-                    continue
-            elif database:
-                existing_entry = database.message_exists(resolved_channel_id, message.id)
+            valid_messages = [msg for msg in telegram_batch if getattr(msg, "message", None)]
+            accumulated_messages.extend(valid_messages)
 
-            message_text = str(message.message)
-            has_coordinates = False
+            if len(accumulated_messages) >= MESSAGE_PROCESSING_BATCH_SIZE:
+                batch_result = await _process_message_batch(
+                    accumulated_messages,
+                    resolved_channel_id,
+                    channel_display_name,
+                    entity,
+                    coordinate_pattern,
+                    database,
+                    skip_existing,
+                    recommendation_manager,
+                    result_collector,
+                )
 
-            matches = coordinate_pattern.findall(message_text)
-            if not matches:
-                extracted = extract_coordinates(message_text)
-                if extracted:
-                    matches = [extracted]
+                stats.messages_inserted += batch_result["inserted"]
+                stats.messages_skipped += batch_result["skipped"]
+                stats.coordinates_found += batch_result["coordinates"]
+                accumulated_messages.clear()
 
-            media_type = "text"
-            if message.media:
-                if isinstance(message.media, MessageMediaPhoto):
-                    media_type = "photo"
-                elif isinstance(message.media, MessageMediaDocument):
-                    media_type = "video/mp4"
-                else:
-                    media_type = "other_media"
-
-            message_date = message.date.strftime("%Y-%m-%d") if message.date else None
-
-            source: str
-            username = getattr(entity, "username", None)
-            if username:
-                source = f"t.me/{username}/{message.id}"
-            else:
-                source = f"t.me/c/{resolved_channel_id}/{message.id}"
-
-            record = {
-                "message_text": message_text,
-                "message_date": message.date.isoformat() if message.date else None,
-                "media_type": media_type,
-                "has_coordinates": 0,
-            }
-
-            row_id = 0
-            if database:
-                row_id = database.add_message(resolved_channel_id, message.id, record)
-                if row_id and not existing_entry:
-                    stats.messages_inserted += 1
-
-            if matches:
-                has_coordinates = True
-                record["has_coordinates"] = 1
-
-                # FIX: Append message metadata once per coordinate, not once per message
-                for latitude, longitude in matches:
-                    lat_value = float(latitude)
-                    lon_value = float(longitude)
-
-                    if result_collector:
-                        result_collector.add_record(
-                            {
-                                "message_id": message.id,
-                                "message_content": message_text,
-                                "message_media_type": media_type,
-                                "message_published_at": message_date or "",
-                                "message_source": source,
-                                "latitude": lat_value,
-                                "longitude": lon_value,
-                            }
-                        )
-
-                    stats.coordinates_found += 1
-
+                if stats.messages_processed % MESSAGE_BATCH_LOG_INTERVAL == 0:
                     LOGGER.info(
-                        "Retrieved coordinate (%s, %s) from message %s in channel %s",
-                        lat_value,
-                        lon_value,
-                        message.id,
-                        channel_display_name,
+                        "Progress: %s messages processed, %s coordinates found",
+                        stats.messages_processed,
+                        stats.coordinates_found,
                     )
 
-                    if database and row_id:
-                        coordinate_batch.append((row_id, lat_value, lon_value))
-                        if len(coordinate_batch) >= COORDINATE_BATCH_SIZE:
-                            database.bulk_add_coordinates(coordinate_batch)
-                            coordinate_batch.clear()
+        if accumulated_messages:
+            batch_result = await _process_message_batch(
+                accumulated_messages,
+                resolved_channel_id,
+                channel_display_name,
+                entity,
+                coordinate_pattern,
+                database,
+                skip_existing,
+                recommendation_manager,
+                result_collector,
+            )
 
-            if database and row_id:
-                # Update message flag if coordinates were found
-                if has_coordinates:
-                    database.add_message(
-                        resolved_channel_id,
-                        message.id,
-                        {"has_coordinates": 1, "last_updated": datetime.datetime.utcnow().isoformat()},
-                    )
-
-            if recommendation_manager:
-                try:
-                    recommendation_manager.process_forwarded_message(
-                        message=message,
-                        current_channel_id=resolved_channel_id,
-                        has_coordinates=has_coordinates,
-                        message_row_id=row_id if row_id else None,
-                    )
-                except (sqlite3.DatabaseError, TypeError, ValueError) as exc:  # pragma: no cover - defensive logging
-                    LOGGER.debug("Recommendation processing failed for message %s: %s", message.id, exc)
-
-        if database and coordinate_batch:
-            database.bulk_add_coordinates(coordinate_batch)
-            coordinate_batch.clear()
+            stats.messages_inserted += batch_result["inserted"]
+            stats.messages_skipped += batch_result["skipped"]
+            stats.coordinates_found += batch_result["coordinates"]
 
         if database:
             database.update_channel_statistics(resolved_channel_id)
