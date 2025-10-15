@@ -20,6 +20,7 @@ from src.database import CoordinatesDatabase
 from src.db_migration import detect_and_migrate_all_results, migrate_existing_csv_to_database
 from src.json_processor import process_telegram_json, save_dataframe_to_csv
 from src.recommendations import RecommendationManager
+from src.config import Config
 
 try:
     from telethon import TelegramClient
@@ -62,31 +63,44 @@ colorama_init(autoreset=True)
 MAIN_MENU = """
 === Telegram Coordinates Scraper ===
 
-Choose an option:
-1. Search a specific channel/group
-2. Search all accessible chats
-3. Process a JSON export file
-4. Scan all known channels with coordinates
-5. View database statistics
-6. Manage database
-7. Manage recommended channels
-8. Exit
+1. Quick Scrape (recommended)
+   → Enter channel(s) and start immediately
+   
+2. Advanced Options
+   → Database management, recommendations, JSON import
+   
+3. View Results & Statistics
 
-Enter your choice (1-8): """
+4. Exit
+
+Enter choice (1-4): """
+
+
+ADVANCED_MENU = """
+=== Advanced Options ===
+
+1. Search all accessible chats
+2. Process a JSON export file
+3. Scan all known channels with coordinates
+4. Manage database
+5. Manage recommended channels
+6. Back to main menu
+
+Enter choice (1-6): """
 
 
 def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
-def load_environment(env_path: Path) -> None:
-    load_dotenv(dotenv_path=env_path)
+def load_environment(env_path: Path) -> Config:
     if not env_path.exists():
         env_path.touch()
+    return Config(env_path)
 
 
-def ensure_api_credentials(env_path: Path) -> tuple[int, str]:
-    api_id = os.environ.get("TELEGRAM_API_ID")
+def ensure_api_credentials(env_path: Path, config: Config) -> tuple[int, str]:
+    api_id = config.api_id
     if not api_id:
         api_id = input("Enter your Telegram API ID: ").strip()
         while not api_id.isdigit():
@@ -94,9 +108,12 @@ def ensure_api_credentials(env_path: Path) -> tuple[int, str]:
             api_id = input("Enter your Telegram API ID: ").strip()
         set_key(str(env_path), "TELEGRAM_API_ID", api_id)
         print("Saved API ID to .env")
-    os.environ["TELEGRAM_API_ID"] = api_id
+        os.environ["TELEGRAM_API_ID"] = api_id
+        api_id = int(api_id)
+    else:
+        os.environ["TELEGRAM_API_ID"] = str(api_id)
 
-    api_hash = os.environ.get("TELEGRAM_API_HASH")
+    api_hash = config.api_hash
     if not api_hash:
         api_hash = input("Enter your Telegram API hash: ").strip()
         while not api_hash:
@@ -109,16 +126,16 @@ def ensure_api_credentials(env_path: Path) -> tuple[int, str]:
     return int(api_id), api_hash
 
 
-def get_database_configuration() -> dict:
+def get_database_configuration(config: Config) -> dict:
     return {
-        "enabled": os.environ.get("DATABASE_ENABLED", "true").lower() == "true",
-        "path": os.environ.get("DATABASE_PATH", "telegram_coordinates.db"),
-        "skip_existing": os.environ.get("DATABASE_SKIP_EXISTING", "true").lower() == "true",
+        "enabled": config.database_enabled,
+        "path": config.database_path,
+        "skip_existing": config.database_skip_existing,
     }
 
 
-def get_default_session_name() -> str:
-    return os.environ.get("TELEGRAM_SESSION_NAME", "simple_scraper")
+def get_default_session_name(config: Config) -> str:
+    return config.session_name
 
 
 def prompt_with_smart_default(
@@ -161,6 +178,7 @@ def prompt_session_name(prompt: str = "Enter Telegram session name to use") -> s
         validator=lambda value: bool(value.strip()),
     )
     os.environ["TELEGRAM_SESSION_NAME"] = session_name
+    set_key(str(env_path), "TELEGRAM_SESSION_NAME", session_name)
     return session_name
 
 
@@ -1107,16 +1125,47 @@ Enter choice: """
             print("Invalid choice. Please try again.")
 
 
+def handle_advanced_options(
+    database: Optional[CoordinatesDatabase],
+    db_config: dict,
+    api_id: int,
+    api_hash: str,
+    recommendation_manager: Optional[RecommendationManager],
+) -> None:
+    while True:
+        choice = input(ADVANCED_MENU).strip()
+        if choice == "1":
+            handle_search_all_chats(database, db_config, api_id, api_hash, recommendation_manager)
+        elif choice == "2":
+            handle_process_json(database)
+        elif choice == "3":
+            handle_scan_known_channels(database, db_config, api_id, api_hash, recommendation_manager)
+        elif choice == "4":
+            handle_database_management(database)
+        elif choice == "5":
+            handle_recommendation_management(
+                recommendation_manager,
+                database,
+                db_config,
+                api_id,
+                api_hash,
+            )
+        elif choice == "6":
+            break
+        else:
+            print("Invalid selection. Please choose an option from 1 to 6.")
+
+
 def main() -> None:
     configure_logging()
     env_path = Path(__file__).resolve().parent / ".env"
-    load_environment(env_path)
-    api_id, api_hash = ensure_api_credentials(env_path)
+    config = load_environment(env_path)
+    api_id, api_hash = ensure_api_credentials(env_path, config)
 
-    session_name = prompt_session_name()
+    session_name = prompt_session_name(config, env_path)
     asyncio.run(ensure_telegram_authentication(api_id, api_hash, session_name))
 
-    db_config = get_database_configuration()
+    db_config = get_database_configuration(config)
     database = CoordinatesDatabase(db_config["path"]) if db_config["enabled"] else None
     recommendation_manager = RecommendationManager(database) if database else None
 
@@ -1133,28 +1182,14 @@ def main() -> None:
         if choice == "1":
             handle_specific_channel(database, db_config, api_id, api_hash, recommendation_manager)
         elif choice == "2":
-            handle_search_all_chats(database, db_config, api_id, api_hash, recommendation_manager)
+            handle_advanced_options(database, db_config, api_id, api_hash, recommendation_manager)
         elif choice == "3":
-            handle_process_json(database)
-        elif choice == "4":
-            handle_scan_known_channels(database, db_config, api_id, api_hash, recommendation_manager)
-        elif choice == "5":
             handle_database_statistics(database)
-        elif choice == "6":
-            handle_database_management(database)
-        elif choice == "7":
-            handle_recommendation_management(
-                recommendation_manager,
-                database,
-                db_config,
-                api_id,
-                api_hash,
-            )
-        elif choice == "8":
+        elif choice == "4":
             print("Goodbye!")
             break
         else:
-            print("Invalid selection. Please choose an option from 1 to 8.")
+            print("Invalid selection. Please choose an option from 1 to 4.")
 
 
 if __name__ == "__main__":  # pragma: no cover - interactive entry point
