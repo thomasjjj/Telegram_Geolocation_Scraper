@@ -114,13 +114,12 @@ async def scrape_channel(
                 continue
 
             existing_entry = False
-            if database and skip_existing and database.message_exists(resolved_channel_id, message.id):
-                stats.messages_skipped += 1
-                continue
-            elif database and skip_existing:
-                existing_entry = False
-            else:
-                existing_entry = database.message_exists(resolved_channel_id, message.id) if database else False
+            if database and skip_existing:
+                if database.message_exists(resolved_channel_id, message.id):
+                    stats.messages_skipped += 1
+                    continue
+            elif database:
+                existing_entry = database.message_exists(resolved_channel_id, message.id)
 
             message_text = str(message.message)
             has_coordinates = False
