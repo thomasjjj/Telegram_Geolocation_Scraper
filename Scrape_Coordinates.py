@@ -152,7 +152,7 @@ def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_has
 
     Args:
         channel_links (str or list): Channel username(s) or ID(s)
-        date_limit (str): Cut-off date in YYYY-MM-DD format
+        date_limit (str, optional): Cut-off date in YYYY-MM-DD format. Use None for no limit.
         output_path (str): Path where to save the CSV file
         api_id (int, optional): Telegram API ID (can be set via environment)
         api_hash (str, optional): Telegram API hash (can be set via environment)
@@ -164,11 +164,12 @@ def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_has
         pandas.DataFrame: DataFrame with extracted coordinates
     """
     # Convert date_limit to datetime object
-    try:
-        date_limit = datetime.datetime.strptime(date_limit, "%Y-%m-%d")
-    except ValueError:
-        logging.error("Invalid date format. Please use YYYY-MM-DD format.")
-        return None
+    if date_limit:
+        try:
+            date_limit = datetime.datetime.strptime(date_limit, "%Y-%m-%d")
+        except ValueError:
+            logging.error("Invalid date format. Please use YYYY-MM-DD format.")
+            return None
 
     # Get API credentials
     if api_id is None:
@@ -437,14 +438,17 @@ if __name__ == "__main__":
         if not channels:
             print("No valid channels selected. Please try again.")
 
-    date_limit = input("Enter the date limit (YYYY-MM-DD): ").strip()
     while True:
+        date_limit_input = input("Enter the date limit (YYYY-MM-DD, leave blank for no limit): ").strip()
+        if not date_limit_input:
+            date_limit = None
+            break
         try:
-            datetime.datetime.strptime(date_limit, "%Y-%m-%d")
+            datetime.datetime.strptime(date_limit_input, "%Y-%m-%d")
+            date_limit = date_limit_input
             break
         except ValueError:
             print("Invalid date format. Please use YYYY-MM-DD.")
-            date_limit = input("Enter the date limit (YYYY-MM-DD): ").strip()
 
     output_path = input("Enter the output CSV path: ").strip()
     while not output_path:
