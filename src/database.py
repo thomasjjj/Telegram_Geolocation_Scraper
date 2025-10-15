@@ -19,7 +19,7 @@ import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from telethon.extensions import BinaryReader
 
@@ -686,11 +686,13 @@ class CoordinatesDatabase:
     # ------------------------------------------------------------------
     # Recommendation system helpers
 
-    def query(self, sql: str, params: Sequence[Any] | None = None) -> List[sqlite3.Row]:
+    def query(self, sql: str, params: Optional[Sequence[Any]] = None) -> List[sqlite3.Row]:
         cursor = self.connect().execute(sql, params or [])
         return cursor.fetchall()
 
-    def query_one(self, sql: str, params: Sequence[Any] | None = None) -> Optional[sqlite3.Row]:
+    def query_one(
+        self, sql: str, params: Optional[Sequence[Any]] = None
+    ) -> Optional[sqlite3.Row]:
         cursor = self.connect().execute(sql, params or [])
         return cursor.fetchone()
 
@@ -698,7 +700,7 @@ class CoordinatesDatabase:
         self,
         table: str,
         where: Optional[str] = None,
-        params: Sequence[Any] | None = None,
+        params: Optional[Sequence[Any]] = None,
     ) -> int:
         sql = f"SELECT COUNT(*) FROM {table}"
         if where:
@@ -820,7 +822,7 @@ class CoordinatesDatabase:
         from_channel_id: int,
         to_channel_id: int,
         had_coordinates: bool,
-        forward_date: Optional[_dt.datetime] | Optional[str] = None,
+        forward_date: Optional[Union[_dt.datetime, str]] = None,
         forward_signature: Optional[str] = None,
     ) -> bool:
         if message_ref is None:
