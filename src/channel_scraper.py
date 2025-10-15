@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING, Union
 
 import pandas as pd
 from telethon import TelegramClient
@@ -189,13 +190,12 @@ async def scrape_channel(
                 continue
 
             existing_entry = False
-            if database and skip_existing and database.message_exists(resolved_channel_id, message.id):
-                stats.messages_skipped += 1
-                continue
-            elif database and skip_existing:
-                existing_entry = False
-            else:
-                existing_entry = database.message_exists(resolved_channel_id, message.id) if database else False
+            if database and skip_existing:
+                if database.message_exists(resolved_channel_id, message.id):
+                    stats.messages_skipped += 1
+                    continue
+            elif database:
+                existing_entry = database.message_exists(resolved_channel_id, message.id)
 
             message_text = str(message.message)
             has_coordinates = False
@@ -308,16 +308,16 @@ async def scrape_channel(
     return stats
 
 
-def _ensure_sequence(value: Sequence[str] | str) -> Sequence[str]:
+def _ensure_sequence(value: Union[Sequence[str], str]) -> Sequence[str]:
     if isinstance(value, (list, tuple, set)):
         return value
     return [value]
 
 
 def channel_scraper(
-    channel_links: Sequence[str] | str,
+    channel_links: Union[Sequence[str], str],
     date_limit: Optional[str],
-    output_path: str | None = None,
+    output_path: Optional[str] = None,
     api_id: Optional[int] = None,
     api_hash: Optional[str] = None,
     session_name: str = "simple_scraper",
@@ -327,7 +327,7 @@ def channel_scraper(
     skip_existing: bool = True,
     db_path: Optional[str] = None,
     database: Optional[CoordinatesDatabase] = None,
-    recommendation_manager: "RecommendationManager" | None = None,
+    recommendation_manager: Optional["RecommendationManager"] = None,
     auto_visualize: bool = False,
     visualization_type: str = "auto",
     batch_size: int = 5000,

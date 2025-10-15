@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Optional, Union
 
 from dotenv import load_dotenv
 
@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 class Config:
     """Load configuration values from environment variables and a ``.env`` file."""
 
-    def __init__(self, env_path: Path | str | None = None) -> None:
+    def __init__(self, env_path: Optional[Union[Path, str]] = None) -> None:
         """Initialise the configuration loader.
 
         Parameters
@@ -68,7 +68,7 @@ class Config:
 
         return os.getenv("DATABASE_SKIP_EXISTING", "true").lower() == "true"
 
-    def get(self, key: str, default: Any | None = None) -> Any | None:
+    def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Retrieve an arbitrary configuration value."""
 
         return os.getenv(key, default)

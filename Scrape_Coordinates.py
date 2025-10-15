@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from dotenv import load_dotenv, set_key
 from colorama import Fore, Style, init as colorama_init
@@ -459,8 +459,12 @@ def _decode_sources(record: Dict[str, Any]) -> List[int]:
 
 def _format_recommendation_line(index: int, recommendation: Dict[str, Any]) -> str:
     username = recommendation.get("username")
-    title = recommendation.get("title") or username or f"ID:{recommendation['channel_id']}"
-    username_display = f"@{username}" if username else f"ID:{recommendation['channel_id']}"
+    title = recommendation.get("title")
+    channel_id = recommendation["channel_id"]
+
+    display_title = title or username or f"ID:{channel_id}"
+    username_display = f"@{username}" if username else "Unavailable"
+    id_display = f"ID:{channel_id}"
     score = recommendation.get("recommendation_score", 0.0)
     forward_count = int(recommendation.get("forward_count") or 0)
     coord_count = int(recommendation.get("coordinate_forward_count") or 0)
@@ -474,7 +478,9 @@ def _format_recommendation_line(index: int, recommendation: Dict[str, Any]) -> s
         indicator = "📌"
 
     line = [
-        f"{index}. {indicator} {title} ({username_display})",
+        f"{index}. {indicator} {display_title}",
+        f"   Username: {username_display}",
+        f"   Channel ID: {id_display}",
         f"   Score: {score:.1f}/100 | {coord_count}/{forward_count} forwards contained coordinates",
     ]
     if sources:
@@ -729,7 +735,6 @@ def _run_recommended_scrape(
         api_hash: str,
         recommendations: List[RecommendationRecord],
 ) -> None:
-    from telethon.tl.types import PeerChannel
     from telethon import TelegramClient
 
     # First, try to enrich any channels without usernames
@@ -753,16 +758,18 @@ def _run_recommended_scrape(
                 print(f"Enrichment failed: {exc}")
                 print("Continuing with available data...")
 
-    identifiers: List[str | PeerChannel] = []
+    identifiers: List[Union[str, PeerChannel]] = []
     for recommendation in recommendations:
         username = recommendation.get("username")
         if username:
             # Use username if available (most reliable)
             identifiers.append(username)
         else:
-            # For numeric IDs, create a PeerChannel object
             channel_id = recommendation["channel_id"]
-            identifiers.append(PeerChannel(channel_id))
+            # Telethon expects identifiers that it can resolve via ``get_entity``.
+            # Using a ``PeerChannel`` instance here would require an ``access_hash``,
+            # so fallback to the channel ID string instead.
+            identifiers.append(str(channel_id))
 
     print(f"Preparing to scrape {len(identifiers)} channel(s).")
     LOGGER.info("Scraping %d recommended channels", len(identifiers))
