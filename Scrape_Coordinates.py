@@ -316,7 +316,7 @@ async def _search_dialogs_for_keywords(
     api_hash: str,
     session_name: str,
     keywords: Iterable[str],
-    message_limit: int = 200,
+    message_limit: Optional[int] = None,
     days_limit: Optional[int] = None,
 ) -> List[SearchResult]:
     cutoff = None
@@ -328,9 +328,9 @@ async def _search_dialogs_for_keywords(
     keyword_list = list(keywords)
 
     LOGGER.info(
-        "Starting chat search: session=%s, message_limit=%d, days_limit=%s",
+        "Starting chat search: session=%s, message_limit=%s, days_limit=%s",
         session_name,
-        message_limit,
+        message_limit if message_limit is not None else "all",
         days_limit,
     )
 
@@ -783,17 +783,19 @@ def handle_search_all_chats(
     days_limit = int(days_input) if days_input else None
 
     message_limit_input = prompt_validated(
-        "Messages to check per chat (default 200): ",
+        "Messages to check per chat (leave blank for all messages): ",
         lambda value: value.isdigit() and int(value) > 0,
         error_msg="Please enter a positive number",
         allow_empty=True,
-        empty_value="200",
     )
-    message_limit = int(message_limit_input)
+    message_limit = int(message_limit_input) if message_limit_input else None
 
     print("\n⚠️  Search Settings:")
     print(f"   • Session: {session_name}")
-    print(f"   • Messages per chat: {message_limit}")
+    print(
+        "   • Messages per chat: "
+        + (str(message_limit) if message_limit is not None else "All messages")
+    )
     print(
         f"   • Time limit: {'Last ' + str(days_limit) + ' days' if days_limit else 'All time'}"
     )
@@ -806,8 +808,8 @@ def handle_search_all_chats(
         return
 
     LOGGER.info(
-        "Searching all chats for geolocation keywords (limit=%d, days_limit=%s)",
-        message_limit,
+        "Searching all chats for geolocation keywords (limit=%s, days_limit=%s)",
+        message_limit if message_limit is not None else "all",
         days_limit,
     )
     results = asyncio.run(
