@@ -70,3 +70,16 @@ def test_bulk_insert_messages_updates_existing(database: CoordinatesDatabase) ->
     assert row is not None
     assert row["message_text"] == "updated"
     assert row["has_coordinates"] == 1
+
+
+def test_bulk_insert_messages_handles_large_batches(database: CoordinatesDatabase) -> None:
+    channel_id = 123
+    message_count = 1100
+    payload = [
+        {"message_id": idx, "message_text": f"message-{idx}"}
+        for idx in range(1, message_count + 1)
+    ]
+
+    id_map = database.bulk_insert_messages(channel_id, payload)
+
+    assert set(id_map.keys()) == {idx for idx in range(1, message_count + 1)}

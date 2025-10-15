@@ -505,16 +505,22 @@ class CoordinatesDatabase:
         with connection:
             connection.executemany(sql, rows)
 
-        placeholders = ",".join("?" for _ in message_ids)
-        cursor = connection.execute(
-            f"""
-            SELECT message_id, id FROM messages
-            WHERE channel_id=? AND message_id IN ({placeholders})
-            """,
-            [int(channel_id), *message_ids],
-        )
+        chunk_size = 900
+        id_map: Dict[int, int] = {}
+        for start in range(0, len(message_ids), chunk_size):
+            chunk = message_ids[start : start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = connection.execute(
+                f"""
+                SELECT message_id, id FROM messages
+                WHERE channel_id=? AND message_id IN ({placeholders})
+                """,
+                [int(channel_id), *chunk],
+            )
 
-        id_map = {int(row["message_id"]): int(row["id"]) for row in cursor.fetchall()}
+            id_map.update(
+                {int(row["message_id"]): int(row["id"]) for row in cursor.fetchall()}
+            )
 
         LOGGER.info(
             "Bulk upserted %s messages for channel %s",
