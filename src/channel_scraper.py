@@ -154,17 +154,20 @@ async def scrape_channel(
                 has_coordinates = True
                 record["has_coordinates"] = 1
 
-                message_ids.append(message.id)
-                message_texts.append(message_text)
-                media_types.append(media_type)
-                dates.append(message_date or "")
-                sources.append(source)
-
+                # FIX: Append message metadata once per coordinate, not once per message
                 for latitude, longitude in matches:
                     lat_value = float(latitude)
                     lon_value = float(longitude)
+
+                    # Append metadata for each coordinate
+                    message_ids.append(message.id)
+                    message_texts.append(message_text)
+                    media_types.append(media_type)
+                    dates.append(message_date or "")
+                    sources.append(source)
                     latitudes.append(lat_value)
                     longitudes.append(lon_value)
+
                     stats.coordinates_found += 1
 
                     LOGGER.info(
