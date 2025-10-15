@@ -461,7 +461,10 @@ def _suggest_channels(
     suggestion_source: Optional[str] = None
 
     if recommendation_manager:
-        for recommendation in recommendation_manager.get_top_recommendations(limit=limit):
+        for recommendation in recommendation_manager.get_top_recommendations(
+            limit=limit,
+            min_hit_rate=recommendation_manager.settings.min_hit_rate,
+        ):
             identifier = recommendation.get("username") or recommendation.get("channel_id")
             if not identifier:
                 continue
@@ -562,21 +565,37 @@ def _format_recommendation_line(index: int, recommendation: Dict[str, Any]) -> s
     coord_count = int(recommendation.get("coordinate_forward_count") or 0)
     sources = _decode_sources(recommendation)
 
-    if score >= 70:
-        indicator = "🔥"
-    elif score >= 50:
-        indicator = "⭐"
+    if forward_count > 0:
+        hit_rate = (coord_count / forward_count) * 100
     else:
+        hit_rate = 0.0
+
+    if hit_rate >= 60.0:
+        indicator = "🔥"
+        quality_label = "EXCELLENT"
+    elif hit_rate >= 40.0:
+        indicator = "⭐"
+        quality_label = "GOOD"
+    elif hit_rate >= 20.0:
         indicator = "📌"
+        quality_label = "MODERATE"
+    elif hit_rate >= 5.0:
+        indicator = "⚠️"
+        quality_label = "LOW"
+    else:
+        indicator = "❌"
+        quality_label = "POOR"
 
     line = [
         f"{index}. {indicator} {display_title}",
         f"   Username: {username_display}",
         f"   Channel ID: {id_display}",
-        f"   Score: {score:.1f}/100 | {coord_count}/{forward_count} forwards contained coordinates",
+        f"   Score: {score:.1f}/100 | Hit Rate: {hit_rate:.1f}% ({coord_count}/{forward_count}) [{quality_label}]",
     ]
     if sources:
         line.append(f"   Forwarded by {len(sources)} tracked channel(s)")
+    if hit_rate < 5.0 and forward_count >= 10:
+        line.append("   ⚠️  WARNING: Very low coordinate rate - may not be useful")
     return "\n".join(line)
 
 
@@ -604,7 +623,8 @@ def show_startup_recommendations(
     print()
 
     top_recommendations = recommendation_manager.get_top_recommendations(
-        limit=recommendation_manager.settings.max_display
+        limit=recommendation_manager.settings.max_display,
+        min_hit_rate=recommendation_manager.settings.min_hit_rate,
     )
 
     if not top_recommendations:
@@ -620,13 +640,14 @@ def show_startup_recommendations(
     print("  S - Scrape all recommended channels now")
     print("  T - Scrape the top recommendations")
     print("  V - Open recommendation management menu")
+    print("  F - Filter by minimum hit rate")
     print("  L - Skip and continue to main menu")
     print()
 
     choice = prompt_validated(
-        "Enter choice (S/T/V/L): ",
-        lambda value: value.upper() in {"S", "T", "V", "L"},
-        error_msg="Please choose S, T, V, or L.",
+        "Enter choice (S/T/V/F/L): ",
+        lambda value: value.upper() in {"S", "T", "V", "F", "L"},
+        error_msg="Please choose S, T, V, F, or L.",
         allow_empty=True,
         empty_value="L",
     ).upper()
@@ -656,6 +677,37 @@ def show_startup_recommendations(
             api_id,
             api_hash,
         )
+    elif choice == "F":
+        def _valid_percentage(value: str) -> bool:
+            try:
+                number = float(value)
+            except ValueError:
+                return False
+            return 0.0 <= number <= 100.0
+
+        min_hit_rate = float(
+            prompt_validated(
+                "Minimum coordinate hit rate % (e.g., 20 for 20%): ",
+                _valid_percentage,
+                error_msg="Please enter a percentage between 0 and 100",
+            )
+        )
+
+        filtered_recs = recommendation_manager.get_top_recommendations(
+            limit=recommendation_manager.settings.max_display,
+            min_hit_rate=min_hit_rate,
+        )
+
+        if not filtered_recs:
+            print(f"\n❌ No recommendations found with hit rate >= {min_hit_rate}%")
+            print("Try a lower threshold or wait for more data.")
+        else:
+            print(
+                f"\n✅ Found {len(filtered_recs)} channel(s) with hit rate >= {min_hit_rate}%:\n"
+            )
+            for idx, rec in enumerate(filtered_recs, start=1):
+                print(_format_recommendation_line(idx, rec))
+                print()
     else:
         print("Continuing to main menu...\n")
 
@@ -844,7 +896,10 @@ def scrape_recommended_channels_menu(
     if mode == "all":
         recommendations = recommendation_manager.list_recommendations(status="pending")
     elif mode == "top":
-        recommendations = recommendation_manager.get_top_recommendations(limit=recommendation_manager.settings.max_display)
+        recommendations = recommendation_manager.get_top_recommendations(
+            limit=recommendation_manager.settings.max_display,
+            min_hit_rate=recommendation_manager.settings.min_hit_rate,
+        )
     else:
         print("\nScrape Recommended Channels")
         print("-" * 40)
@@ -869,7 +924,10 @@ def scrape_recommended_channels_menu(
                     error_msg="Please enter a positive integer.",
                 )
             )
-            recommendations = recommendation_manager.get_top_recommendations(limit=limit)
+            recommendations = recommendation_manager.get_top_recommendations(
+                limit=limit,
+                min_hit_rate=recommendation_manager.settings.min_hit_rate,
+            )
         elif choice == "3":
             view_all_recommendations(recommendation_manager)
             indices_input = input("Enter recommendation numbers to scrape (comma-separated): ").strip()
@@ -1111,8 +1169,9 @@ def display_recommendation_menu() -> None:
     print("  6. Enrich recommendations (fetch channel details)")
     print("  7. Export recommendations to CSV")
     print("  8. View forward analysis")
-    print("  9. Harvest Telegram API recommendations (NEW)")
-    print(" 10. Back to main menu")
+    print("  9. Harvest Telegram API recommendations")
+    print(" 10. Recalculate recommendation scores")
+    print(" 11. Back to main menu")
     print()
 
 
@@ -1120,9 +1179,9 @@ def get_recommendation_choice() -> str:
     """Return a validated menu selection for recommendation management."""
 
     return prompt_validated(
-        "Enter choice (1-10): ",
-        lambda value: value in {str(i) for i in range(1, 11)},
-        error_msg="Please select an option between 1 and 10.",
+        "Enter choice (1-11): ",
+        lambda value: value in {str(i) for i in range(1, 12)},
+        error_msg="Please select an option between 1 and 11.",
     )
 
 
@@ -1155,7 +1214,7 @@ def execute_recommendation_action(
     Returns ``False`` when the caller should exit the menu.
     """
 
-    if choice == "10":
+    if choice == "11":
         LOGGER.debug("Exiting recommendation management menu")
         return False
 
@@ -1179,6 +1238,7 @@ def execute_recommendation_action(
             api_id,
             api_hash,
         ),
+        "10": lambda: recalculate_recommendation_scores_cli(recommendation_manager),
     }
 
     handler = handlers.get(choice)
@@ -1237,7 +1297,10 @@ def view_all_recommendations(recommendation_manager: RecommendationManager) -> N
 
 
 def view_top_recommendations(recommendation_manager: RecommendationManager, limit: int = 10) -> None:
-    recommendations = recommendation_manager.get_top_recommendations(limit=limit)
+    recommendations = recommendation_manager.get_top_recommendations(
+        limit=limit,
+        min_hit_rate=recommendation_manager.settings.min_hit_rate,
+    )
     if not recommendations:
         print("No recommendations meet the minimum score threshold.")
         return
@@ -1265,7 +1328,11 @@ def search_recommendations_cli(recommendation_manager: RecommendationManager) ->
 
 
 def accept_reject_recommendations(recommendation_manager: RecommendationManager) -> None:
-    recommendations = recommendation_manager.get_top_recommendations(limit=20, min_score=0.0)
+    recommendations = recommendation_manager.get_top_recommendations(
+        limit=20,
+        min_score=0.0,
+        min_hit_rate=0.0,
+    )
     if not recommendations:
         print("No pending recommendations available for review.")
         return
@@ -1418,6 +1485,19 @@ def view_forward_analysis(recommendation_manager: RecommendationManager) -> None
             f"{title:<35} {row['recommendation_score']:<7.1f} {row['forward_count']:<9} "
             f"{row['coord_count']:<9} {row['source_diversity']:<7}"
         )
+
+
+def recalculate_recommendation_scores_cli(
+    recommendation_manager: RecommendationManager,
+) -> None:
+    print("\n🔄 Recalculating recommendation scores with the latest algorithm...\n")
+    updated = recommendation_manager.recalculate_all_scores()
+
+    if updated:
+        print(f"✅ Updated {updated} recommendation(s). Scores are now refreshed.")
+    else:
+        print("ℹ️ All recommendation scores were already up to date.")
+
 def handle_process_json(database: Optional[CoordinatesDatabase]) -> None:
     json_file = prompt_validated(
         "Enter the path to the Telegram JSON export: ",

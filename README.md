@@ -198,6 +198,51 @@ Set `TELEGRAM_RECS_AUTO_HARVEST=true` in `.env` to enable background harvesting 
 - High-density sources feed additional leads back into the discovery loop.
 - Reduces manual hunting by growing a self-sustaining network of channels.
 
+### Recommendation System
+
+The scraper maintains a queue of recommended channels sourced from forward analysis and Telegram's own suggestions. The scoring
+system is designed to prioritise channels that consistently include usable coordinates.
+
+#### Scoring Overview
+
+- **Coordinate Hit Rate (up to 60 points):**
+  - 80%+ hit rate → Excellent (60 pts)
+  - 60–80% → Very good (55 pts)
+  - 40–60% → Good (45 pts)
+  - 20–40% → Moderate (30 pts)
+  - 10–20% → Low (15 pts)
+  - 5–10% → Very low (5 pts)
+  - <5% → Negligible (0 pts)
+- **Sample Confidence Modifier:** Larger forward counts boost confidence up to ×1.25. Tiny samples (<10 forwards) receive a
+  cautious multiplier and an additional penalty if `RECOMMENDATIONS_PENALTY_LOW_SAMPLE=true` (default).
+- **Trust Signals (up to 40 points):** Source diversity, recency, verification, subscriber counts, and Telegram recommendation
+  metadata provide additive trust bonuses.
+- **Penalties:** Scam/fake channels are scored at zero, and inaccessible channels receive a 50% penalty.
+
+The final score is capped between 0 and 100, keeping high hit-rate channels at the top of the queue while demoting spammy or
+low-signal sources.
+
+#### Quality Indicators
+
+When viewing recommendations in the CLI, each entry displays a quality icon based on hit rate:
+
+- 🔥 **Excellent:** ≥60% of forwards include coordinates.
+- ⭐ **Good:** 40–60% hit rate.
+- 📌 **Moderate:** 20–40% hit rate.
+- ⚠️ **Low:** 5–20% hit rate.
+- ❌ **Poor:** <5% hit rate (a warning is shown when the sample size is meaningful).
+
+#### Filtering Recommendations
+
+From the startup recommendation banner, press **F** to filter suggestions by minimum coordinate hit rate. The management menu
+also honours the global `RECOMMENDATIONS_MIN_HIT_RATE` setting (default 5%) to hide channels that rarely post coordinates. Set
+`RECOMMENDATIONS_HIDE_ZERO_COORDS=true` if you only want to see channels that have already produced at least one coordinate.
+
+#### Recalculating Scores
+
+After changing configuration weights or updating the scoring algorithm, open **Advanced Options → Manage recommended channels →
+Recalculate recommendation scores**. The tool will refresh every stored recommendation using the latest heuristics.
+
 ## Processing JSON Exports
 
 To process an exported Telegram chat:
