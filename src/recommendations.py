@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from telethon import TelegramClient
 from telethon.errors import RPCError
 from telethon.tl.functions.channels import GetChannelRecommendationsRequest
-from telethon.tl.types import PeerChannel, PeerChat, PeerUser
+from telethon.tl.types import Channel, Chat, PeerChannel, PeerChat, PeerUser
 
 from src.database import CoordinatesDatabase
 
@@ -129,6 +129,11 @@ class RecommendationManager:
             return None
 
         source_channel_id = forward_info["channel_id"]
+        if not self._is_valid_channel_id(source_channel_id, forward_info):
+            LOGGER.debug(
+                "Skipping forward from invalid entity type: %s", source_channel_id
+            )
+            return None
         if self._is_already_followed(source_channel_id):
             return None
 
@@ -153,6 +158,8 @@ class RecommendationManager:
                 update_data["title"] = forward_info["title"]
             if forward_info.get("username") and not existing.get("username"):
                 update_data["username"] = forward_info["username"]
+            if forward_info.get("entity_type") and not existing.get("entity_type"):
+                update_data["entity_type"] = forward_info["entity_type"]
 
             self.db.update_recommended_channel(source_channel_id, update_data)
             created = False
@@ -161,6 +168,7 @@ class RecommendationManager:
                 "username": forward_info.get("username"),
                 "title": forward_info.get("title"),
                 "channel_type": forward_info.get("channel_type"),
+                "entity_type": forward_info.get("entity_type"),
                 "first_seen": now_iso,
                 "last_seen": now_iso,
                 "discovered_from_channels": json.dumps(discovered_from),
@@ -674,17 +682,76 @@ class RecommendationManager:
     async def enrich_recommendation(self, client: TelegramClient, channel_id: int) -> bool:
         try:
             entity = await client.get_entity(channel_id)
+
+            if not self._is_channel_entity(entity):
+                entity_type = type(entity).__name__
+                LOGGER.warning(
+                    "Entity %s is not a channel (type: %s)", channel_id, entity_type
+                )
+                self.db.update_recommended_channel(
+                    channel_id,
+                    {
+                        "is_accessible": False,
+                        "user_status": "invalid_entity_type",
+                        "user_notes": f"Not a channel (type: {entity_type})",
+                        "entity_type": entity_type.lower(),
+                    },
+                )
+                self.db.add_recommendation_event(
+                    channel_id,
+                    "enrichment_failed",
+                    {"reason": "invalid_entity_type", "type": entity_type},
+                )
+                return False
         except (RPCError, ValueError) as exc:  # pragma: no cover - Telethon RPC errors
+            error_text = str(exc)
             LOGGER.warning("Failed to fetch entity for channel %s: %s", channel_id, exc)
-            self.db.update_recommended_channel(
-                channel_id,
-                {
-                    "is_accessible": False,
-                    "user_status": "inaccessible",
-                },
+
+            update_payload: Dict[str, Any] = {
+                "is_accessible": False,
+            }
+
+            if "PeerUser" in error_text or "USER_ID_INVALID" in error_text:
+                update_payload.update(
+                    {
+                        "user_status": "invalid_entity_type",
+                        "user_notes": "This is a user ID, not a channel",
+                        "entity_type": "user",
+                    }
+                )
+            elif "CHANNEL_PRIVATE" in error_text:
+                update_payload.update(
+                    {
+                        "user_status": "private",
+                        "user_notes": "Private channel - requires invitation",
+                        "requires_join": True,
+                    }
+                )
+            elif "CHANNEL_INVALID" in error_text:
+                update_payload.update(
+                    {
+                        "user_status": "inaccessible",
+                        "user_notes": "Channel invalid or deleted",
+                    }
+                )
+            else:
+                update_payload.setdefault("user_status", "inaccessible")
+
+            self.db.update_recommended_channel(channel_id, update_payload)
+            if update_payload.get("user_status") == "invalid_entity_type":
+                self.db.add_recommendation_event(
+                    channel_id,
+                    "enrichment_failed",
+                    {"reason": "invalid_entity_type"},
+                )
+            return False
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            LOGGER.error(
+                "Unexpected error enriching channel %s: %s", channel_id, exc
             )
             return False
 
+        entity_type = self._map_entity_type(entity)
         enrichment_data = {
             "title": getattr(entity, "title", None),
             "username": getattr(entity, "username", None),
@@ -694,6 +761,7 @@ class RecommendationManager:
             "subscriber_count": getattr(entity, "participants_count", None),
             "is_accessible": True,
             "requires_join": not bool(getattr(entity, "username", None)),
+            "entity_type": entity_type,
         }
         self.db.update_recommended_channel(channel_id, enrichment_data)
         self._recalculate_score(channel_id)
@@ -716,10 +784,13 @@ class RecommendationManager:
 
         peer = getattr(header, "from_id", None)
         channel_id: Optional[int] = None
+        entity_type: Optional[str] = None
         if isinstance(peer, PeerChannel):
             channel_id = peer.channel_id
+            entity_type = "channel"
         elif isinstance(peer, PeerChat):
             channel_id = peer.chat_id
+            entity_type = "supergroup"
         elif isinstance(peer, PeerUser):
             return None
 
@@ -728,10 +799,46 @@ class RecommendationManager:
 
         return {
             "channel_id": int(channel_id),
+            "entity_type": entity_type,
             "forward_date": getattr(header, "date", None),
             "forward_signature": getattr(header, "post_author", None),
             "title": getattr(header, "from_name", None),
         }
+
+    def _is_valid_channel_id(
+        self, channel_id: int, forward_info: Dict[str, Any]
+    ) -> bool:
+        entity_type = forward_info.get("entity_type")
+
+        if entity_type == "user":
+            return False
+
+        if entity_type in {"channel", "supergroup", "megagroup"}:
+            return True
+
+        if channel_id < 1_000_000_000:
+            LOGGER.debug(
+                "Rejecting potential user ID %s (below channel ID threshold)",
+                channel_id,
+            )
+            return False
+
+        return True
+
+    def _is_channel_entity(self, entity: Any) -> bool:
+        return isinstance(entity, (Channel, Chat))
+
+    def _map_entity_type(self, entity: Any) -> str:
+        if isinstance(entity, Channel):
+            if getattr(entity, "megagroup", False):
+                return "supergroup"
+            return "channel"
+        if isinstance(entity, Chat):
+            return "group"
+        return type(entity).__name__.lower()
+
+    def get_recommended_channel(self, channel_id: int) -> Optional[Dict[str, Any]]:
+        return self.db.get_recommended_channel(channel_id)
 
     def _merge_sources(self, existing: Optional[Dict[str, Any]], new_source: int) -> List[int]:
         sources: List[int] = []

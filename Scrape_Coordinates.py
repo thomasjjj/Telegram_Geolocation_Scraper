@@ -977,8 +977,10 @@ def _run_recommended_scrape(
             try:
                 asyncio.run(enrich_batch())
                 # Reload recommendations to get updated data
-                recommendations = [recommendation_manager.get_recommended_channel(r["channel_id"])
-                                   for r in recommendations]
+                recommendations = [
+                    recommendation_manager.get_recommended_channel(r["channel_id"])
+                    for r in recommendations
+                ]
                 recommendations = [r for r in recommendations if r is not None]
             except (RPCError, ValueError, OSError) as exc:
                 print(f"Enrichment failed: {exc}")
@@ -1169,9 +1171,10 @@ def display_recommendation_menu() -> None:
     print("  6. Enrich recommendations (fetch channel details)")
     print("  7. Export recommendations to CSV")
     print("  8. View forward analysis")
-    print("  9. Harvest Telegram API recommendations")
-    print(" 10. Recalculate recommendation scores")
-    print(" 11. Back to main menu")
+    print("  9. Clean up invalid recommendations")
+    print(" 10. Harvest Telegram API recommendations")
+    print(" 11. Recalculate recommendation scores")
+    print(" 12. Back to main menu")
     print()
 
 
@@ -1179,9 +1182,9 @@ def get_recommendation_choice() -> str:
     """Return a validated menu selection for recommendation management."""
 
     return prompt_validated(
-        "Enter choice (1-11): ",
-        lambda value: value in {str(i) for i in range(1, 12)},
-        error_msg="Please select an option between 1 and 11.",
+        "Enter choice (1-12): ",
+        lambda value: value in {str(i) for i in range(1, 13)},
+        error_msg="Please select an option between 1 and 12.",
     )
 
 
@@ -1214,7 +1217,7 @@ def execute_recommendation_action(
     Returns ``False`` when the caller should exit the menu.
     """
 
-    if choice == "11":
+    if choice == "12":
         LOGGER.debug("Exiting recommendation management menu")
         return False
 
@@ -1233,12 +1236,13 @@ def execute_recommendation_action(
         "6": lambda: enrich_recommendations_cli(recommendation_manager, api_id, api_hash),
         "7": lambda: export_recommendations_cli(recommendation_manager),
         "8": lambda: view_forward_analysis(recommendation_manager),
-        "9": lambda: harvest_telegram_recommendations_cli(
+        "9": lambda: cleanup_invalid_recommendations_cli(database),
+        "10": lambda: harvest_telegram_recommendations_cli(
             recommendation_manager,
             api_id,
             api_hash,
         ),
-        "10": lambda: recalculate_recommendation_scores_cli(recommendation_manager),
+        "11": lambda: recalculate_recommendation_scores_cli(recommendation_manager),
     }
 
     handler = handlers.get(choice)
@@ -1485,6 +1489,65 @@ def view_forward_analysis(recommendation_manager: RecommendationManager) -> None
             f"{title:<35} {row['recommendation_score']:<7.1f} {row['forward_count']:<9} "
             f"{row['coord_count']:<9} {row['source_diversity']:<7}"
         )
+
+
+def cleanup_invalid_recommendations_cli(
+    database: Optional[CoordinatesDatabase],
+) -> None:
+    if database is None:
+        print("Database connection is not available.")
+        return
+
+    print("\n" + "=" * 60)
+    print("CLEAN UP INVALID RECOMMENDATIONS")
+    print("=" * 60)
+    print("This will remove entries that are likely user IDs or otherwise invalid.\n")
+
+    preview_rows = database.query(
+        """
+        SELECT channel_id, username, title, user_status, entity_type
+        FROM recommended_channels
+        WHERE channel_id < 1000000000
+           OR user_status = 'invalid_entity_type'
+           OR entity_type = 'user'
+        ORDER BY channel_id
+        LIMIT 10
+        """
+    )
+    preview = [dict(row) for row in preview_rows]
+
+    if not preview:
+        print("✅ No invalid recommendations found.")
+        return
+
+    print(f"Found {len(preview_rows)} example entries (showing up to 10):")
+    for record in preview:
+        label = record.get("username") or record.get("title") or "<unknown>"
+        status = record.get("user_status") or "pending"
+        entity_type = record.get("entity_type") or "unknown"
+        print(
+            f"  • ID {record['channel_id']}: {label} | status={status} | entity={entity_type}"
+        )
+
+    confirm = input("Proceed with cleanup? (y/N): ").strip().lower()
+    if confirm != "y":
+        print("Cleanup cancelled.")
+        return
+
+    try:
+        stats = database.cleanup_invalid_recommendations()
+    except sqlite3.DatabaseError as exc:
+        LOGGER.error("Failed to clean up recommendations: %s", exc)
+        print("Cleanup failed due to a database error.")
+        return
+
+    print("\nCleanup complete:")
+    print(f"  • Total before: {stats['total_before']}")
+    print(f"  • Removed (low ID): {stats['removed_by_heuristic']}")
+    print(f"  • Removed (invalid status): {stats['removed_by_status']}")
+    print(f"  • Removed (entity type): {stats['removed_by_type']}")
+    print(f"  • Total removed: {stats['total_removed']}")
+    print(f"  • Total after: {stats['total_after']}")
 
 
 def recalculate_recommendation_scores_cli(

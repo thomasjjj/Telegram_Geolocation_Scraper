@@ -299,6 +299,26 @@ Use the built-in menu under **Advanced Options → Visualise coordinates (Kepler
 
 ## Troubleshooting
 
+### "Could not find the input entity for PeerUser" warnings
+
+This message appears when forwards from regular users were mistakenly added as
+recommended channels. Update to the latest release and then run the cleanup
+utility:
+
+```bash
+python scripts/fix_recommendation_entities.py --database telegram_coordinates.db
+```
+
+You can also select **Clean up invalid recommendations** from the CLI menu
+(Advanced Options → Manage recommended channels) to purge bad records.
+
+### AttributeError: 'RecommendationManager' object has no attribute 'get_recommended_channel'
+
+Older builds expected recommendation helpers on the database instance. The
+current release exposes convenient proxy methods directly on
+``RecommendationManager``. Update the codebase and rerun the CLI; no further
+action is required once the upgrade is applied.
+
 ### "Search all chats" takes too long
 
 - Limit the search to recent messages (e.g., last 30 days).
