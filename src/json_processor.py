@@ -1,12 +1,17 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
 import time
+from typing import Any, Dict, List
+
 import pandas as pd
+
 from src.coordinates import extract_coordinates
 
 
-def _get_elapsed_time(start_time):
+def _get_elapsed_time(start_time: float) -> str:
     """Get elapsed time since start in a readable format."""
     elapsed = time.time() - start_time
     if elapsed < 60:
@@ -21,7 +26,7 @@ def _get_elapsed_time(start_time):
         return f"{hours}h {minutes}m"
 
 
-def _get_processing_rate(messages_processed, start_time):
+def _get_processing_rate(messages_processed: int, start_time: float) -> float:
     """Calculate the messages processing rate (messages per second)."""
     elapsed = time.time() - start_time
     if elapsed > 0:
@@ -29,8 +34,16 @@ def _get_processing_rate(messages_processed, start_time):
     return 0
 
 
-def _update_progress_display(messages_processed, coordinates_found, start_time, current_count, total_messages,
-                             last_count, last_update_time, force=False):
+def _update_progress_display(
+    messages_processed: int,
+    coordinates_found: int,
+    start_time: float,
+    current_count: int,
+    total_messages: int,
+    last_count: int,
+    last_update_time: float,
+    force: bool = False,
+) -> float:
     """Update the progress display with current stats.
 
     Args:
@@ -96,7 +109,7 @@ def _update_progress_display(messages_processed, coordinates_found, start_time, 
     return current_time
 
 
-def process_telegram_json(json_file_path, post_link_base):
+def process_telegram_json(json_file_path: str, post_link_base: str) -> pd.DataFrame:
     """
     Process a Telegram JSON export file to extract coordinates.
 
@@ -107,7 +120,7 @@ def process_telegram_json(json_file_path, post_link_base):
     Returns:
         pandas.DataFrame: DataFrame with extracted coordinates
     """
-    messages_with_coordinates = []
+    messages_with_coordinates: List[Dict[str, Any]] = []
     start_time = time.time()
     messages_processed = 0
     last_status_update = start_time
@@ -117,8 +130,8 @@ def process_telegram_json(json_file_path, post_link_base):
     try:
         # Open and load the JSON file
         logging.info(f"Loading JSON file: {json_file_path}")
-        with open(json_file_path, 'r', encoding='utf-8') as f:
-            telegram_data = json.load(f)
+        with open(json_file_path, 'r', encoding='utf-8') as handle:
+            telegram_data = json.load(handle)
 
         # Get total number of messages for progress tracking
         total_messages = len(telegram_data.get('messages', []))
@@ -223,11 +236,15 @@ def process_telegram_json(json_file_path, post_link_base):
             time_str = f"{hours} hours {minutes} minutes"
 
         logging.info(
-            f"JSON processing completed in {time_str}: Processed {messages_processed} messages, found {len(messages_with_coordinates)} coordinates")
+            "JSON processing completed in %s: Processed %s messages, found %s coordinates",
+            time_str,
+            messages_processed,
+            len(messages_with_coordinates),
+        )
         return df
 
-    except Exception as e:
-        logging.error(f"Error processing JSON file: {e}")
+    except Exception as error:
+        logging.error("Error processing JSON file: %s", error)
         # Print a newline in case exception occurred during progress display
         print()
         # Return empty DataFrame with expected columns
@@ -237,7 +254,7 @@ def process_telegram_json(json_file_path, post_link_base):
         ])
 
 
-def save_dataframe_to_csv(df, csv_file_path):
+def save_dataframe_to_csv(df: pd.DataFrame, csv_file_path: str) -> bool:
     """
     Save a DataFrame to a CSV file.
 
@@ -252,7 +269,7 @@ def save_dataframe_to_csv(df, csv_file_path):
         # Ensure the directory exists
         os.makedirs(os.path.dirname(csv_file_path) if os.path.dirname(csv_file_path) else '.', exist_ok=True)
 
-        logging.info(f"Saving {len(df)} records to CSV file: {csv_file_path}")
+        logging.info("Saving %s records to CSV file: %s", len(df), csv_file_path)
         print(f"Saving {len(df)} records to CSV file...")
         start_time = time.time()
 
@@ -263,9 +280,13 @@ def save_dataframe_to_csv(df, csv_file_path):
 
         elapsed = time.time() - start_time
         print(f"\rSave completed in {elapsed:.2f} seconds      ")
-        logging.info(f"DataFrame successfully saved to CSV file in {elapsed:.2f} seconds: {csv_file_path}")
+        logging.info(
+            "DataFrame successfully saved to CSV file in %.2f seconds: %s",
+            elapsed,
+            csv_file_path,
+        )
         return True
-    except Exception as e:
-        logging.error(f"Failed to save DataFrame to CSV: {e}")
-        print(f"\rError: Failed to save DataFrame to CSV: {e}      ")
+    except Exception as error:
+        logging.error("Failed to save DataFrame to CSV: %s", error)
+        print(f"\rError: Failed to save DataFrame to CSV: {error}      ")
         return False

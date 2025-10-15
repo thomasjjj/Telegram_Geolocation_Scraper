@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from dotenv import load_dotenv, set_key
 
@@ -105,7 +105,7 @@ def ensure_api_credentials(env_path: Path) -> tuple[int, str]:
     return int(api_id), api_hash
 
 
-def get_database_configuration() -> dict:
+def get_database_configuration() -> Dict[str, Any]:
     return {
         "enabled": os.environ.get("DATABASE_ENABLED", "true").lower() == "true",
         "path": os.environ.get("DATABASE_PATH", "telegram_coordinates.db"),
@@ -159,12 +159,12 @@ async def _search_dialogs_for_keywords(
     keywords: Iterable[str],
     message_limit: int = 200,
     days_limit: Optional[int] = None,
-):
-    cutoff = None
+) -> List[Dict[str, Any]]:
+    cutoff: Optional[datetime.datetime] = None
     if days_limit is not None:
         cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days_limit)
 
-    results = []
+    results: List[Dict[str, Any]] = []
 
     async with TelegramClient(session_name, api_id, api_hash) as client:
         async for dialog in client.iter_dialogs():
@@ -274,7 +274,7 @@ def _format_recommendation_line(index: int, recommendation: Dict[str, Any]) -> s
 def show_startup_recommendations(
     recommendation_manager: Optional[RecommendationManager],
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: Dict[str, Any],
     api_id: int,
     api_hash: str,
 ) -> None:
@@ -347,7 +347,7 @@ def show_startup_recommendations(
 
 def handle_specific_channel(
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: Dict[str, Any],
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
@@ -377,7 +377,7 @@ def handle_specific_channel(
 
 def handle_search_all_chats(
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: Dict[str, Any],
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
@@ -441,7 +441,7 @@ def handle_search_all_chats(
 def scrape_recommended_channels_menu(
     recommendation_manager: Optional[RecommendationManager],
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: Dict[str, Any],
     api_id: int,
     api_hash: str,
     mode: str = "interactive",
@@ -502,12 +502,12 @@ def scrape_recommended_channels_menu(
 
 
 def _run_recommended_scrape(
-        recommendation_manager: RecommendationManager,
-        database: Optional[CoordinatesDatabase],
-        db_config: dict,
-        api_id: int,
-        api_hash: str,
-        recommendations: List[Dict[str, Any]],
+    recommendation_manager: RecommendationManager,
+    database: Optional[CoordinatesDatabase],
+    db_config: Dict[str, Any],
+    api_id: int,
+    api_hash: str,
+    recommendations: Sequence[Dict[str, Any]],
 ) -> None:
     from telethon.tl.types import PeerChannel
     from telethon import TelegramClient
@@ -579,7 +579,7 @@ def _run_recommended_scrape(
 def handle_recommendation_management(
     recommendation_manager: Optional[RecommendationManager],
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: Dict[str, Any],
     api_id: int,
     api_hash: str,
 ) -> None:
@@ -860,7 +860,7 @@ def handle_process_json(database: Optional[CoordinatesDatabase]) -> None:
 
 def handle_scan_known_channels(
     database: Optional[CoordinatesDatabase],
-    db_config: dict,
+    db_config: Dict[str, Any],
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],

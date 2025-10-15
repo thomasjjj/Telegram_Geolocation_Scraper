@@ -1,8 +1,10 @@
-import os
+from __future__ import annotations
+
 import csv
 import logging
+import os
 import zipfile
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from xml.dom import minidom
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -47,7 +49,7 @@ def _ensure_directory(file_path: str) -> None:
         os.makedirs(directory, exist_ok=True)
 
 
-def _choose_value(record: Dict[str, object], keys) -> Optional[str]:
+def _choose_value(record: Dict[str, object], keys: Sequence[str]) -> Optional[str]:
     """Return the first non-empty value for the provided keys."""
 
     for key in keys:
@@ -66,7 +68,10 @@ def _truncate_text(text: str, max_length: int = 80) -> str:
     return text[: max_length - 3].rstrip() + "..."
 
 
-def _format_description(record: Dict[str, object], description_fields: Optional[List[str]]) -> str:
+def _format_description(
+    record: Dict[str, object],
+    description_fields: Optional[Sequence[str]],
+) -> str:
     """Build a human-readable description string for KML."""
 
     lines: List[str] = []
@@ -125,8 +130,11 @@ def _append_extended_data(placemark: Element, record: Dict[str, object]) -> None
         placemark.remove(extended_data)
 
 
-def _render_kml(records: List[Dict[str, object]], document_name: str,
-                description_fields: Optional[List[str]] = None) -> bytes:
+def _render_kml(
+    records: Sequence[Dict[str, object]],
+    document_name: str,
+    description_fields: Optional[Sequence[str]] = None,
+) -> bytes:
     """Render records as a pretty-printed KML document."""
 
     kml_root = Element("kml", xmlns=KML_NAMESPACE)
@@ -186,7 +194,10 @@ def _render_kml(records: List[Dict[str, object]], document_name: str,
     return parsed.toprettyxml(indent="  ", encoding="utf-8")
 
 
-def _rows_to_records(headers: List[str], rows: List[List[object]]) -> List[Dict[str, object]]:
+def _rows_to_records(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[object]],
+) -> List[Dict[str, object]]:
     """Convert CSV rows and headers into dictionaries."""
 
     records: List[Dict[str, object]] = []
@@ -204,9 +215,14 @@ def _rows_to_records(headers: List[str], rows: List[List[object]]) -> List[Dict[
 class CoordinatesWriter:
     """CSV writer for coordinates data with optional KML/KMZ export."""
 
-    def __init__(self, csv_file_path: str, kml_file_path: Optional[str] = None,
-                 kmz_file_path: Optional[str] = None, document_name: str = "Telegram Coordinates",
-                 description_fields: Optional[List[str]] = None):
+    def __init__(
+        self,
+        csv_file_path: str,
+        kml_file_path: Optional[str] = None,
+        kmz_file_path: Optional[str] = None,
+        document_name: str = "Telegram Coordinates",
+        description_fields: Optional[Sequence[str]] = None,
+    ) -> None:
         """Initialize the coordinates writer.
 
         Args:
@@ -220,8 +236,8 @@ class CoordinatesWriter:
         self.csv_file_path = csv_file_path
         _ensure_directory(csv_file_path)
         self.file_exists = os.path.isfile(csv_file_path)
-        self.file = None
-        self.writer = None
+        self.file: Optional[Any] = None
+        self.writer: Optional[_CSVProxyWriter] = None
 
         self.kml_file_path = kml_file_path
         self.kmz_file_path = kmz_file_path
@@ -231,7 +247,7 @@ class CoordinatesWriter:
         self.rows: Optional[List[List[object]]] = [] if (kml_file_path or kmz_file_path) else None
         self.headers: Optional[List[str]] = None
 
-    def _load_existing_rows(self):
+    def _load_existing_rows(self) -> None:
         """Load existing CSV data into memory when additional exports are requested."""
 
         if self.rows is None or not self.file_exists:
@@ -247,9 +263,9 @@ class CoordinatesWriter:
         except FileNotFoundError:
             return
         except Exception as exc:
-            logging.warning(f"Failed to preload existing CSV data for export: {exc}")
+            logging.warning("Failed to preload existing CSV data for export: %s", exc)
 
-    def __enter__(self):
+    def __enter__(self) -> "_CSVProxyWriter":
         """Context manager entry - open the CSV file."""
 
         self._load_existing_rows()
@@ -279,26 +295,26 @@ class CoordinatesWriter:
             self.writer = _CSVProxyWriter(csv_writer, self)
             return self.writer
 
-        except Exception as e:
-            logging.error(f"Failed to open CSV file: {e}")
+        except Exception as error:
+            logging.error("Failed to open CSV file: %s", error)
             if self.file:
                 self.file.close()
             raise
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         """Context manager exit - close the CSV file and trigger additional exports."""
 
         if self.file:
             self.file.close()
 
         if exc_type:
-            logging.error(f"An error occurred while writing to CSV: {exc_val}")
+            logging.error("An error occurred while writing to CSV: %s", exc_val)
             return False
 
         self._export_additional_formats()
         return True
 
-    def _export_additional_formats(self):
+    def _export_additional_formats(self) -> None:
         """Export collected rows to any requested additional formats."""
 
         if self.rows is None or not self.headers:
@@ -318,11 +334,11 @@ class CoordinatesWriter:
 class _CSVProxyWriter:
     """Proxy object that mirrors csv.writer while collecting written rows."""
 
-    def __init__(self, csv_writer, parent: CoordinatesWriter):
+    def __init__(self, csv_writer: Any, parent: CoordinatesWriter) -> None:
         self._csv_writer = csv_writer
         self._parent = parent
 
-    def writerow(self, row):
+    def writerow(self, row: Sequence[object]) -> None:
         self._csv_writer.writerow(row)
         if self._parent.rows is not None:
             if self._parent.headers is None:
@@ -330,15 +346,19 @@ class _CSVProxyWriter:
             else:
                 self._parent.rows.append(list(row))
 
-    def writerows(self, rows):
+    def writerows(self, rows: Sequence[Sequence[object]]) -> None:
         for row in rows:
             self.writerow(row)
 
-    def __getattr__(self, item):
+    def __getattr__(self, item: str) -> Any:
         return getattr(self._csv_writer, item)
 
 
-def save_to_csv(data, csv_file_path, headers=None):
+def save_to_csv(
+    data: Sequence[Sequence[object]],
+    csv_file_path: str,
+    headers: Optional[Sequence[str]] = None,
+) -> bool:
     """
     Save data to a CSV file.
 
@@ -364,17 +384,20 @@ def save_to_csv(data, csv_file_path, headers=None):
             for row in data:
                 writer.writerow(row)
 
-        logging.info(f"Data saved to CSV file: {csv_file_path}")
+        logging.info("Data saved to CSV file: %s", csv_file_path)
         return True
 
-    except Exception as e:
-        logging.error(f"Failed to write to CSV file: {e}")
+    except Exception as error:
+        logging.error("Failed to write to CSV file: %s", error)
         return False
 
 
-def save_records_to_kml(records: List[Dict[str, object]], kml_file_path: str,
-                        document_name: str = "Telegram Coordinates",
-                        description_fields: Optional[List[str]] = None) -> bool:
+def save_records_to_kml(
+    records: Sequence[Dict[str, object]],
+    kml_file_path: str,
+    document_name: str = "Telegram Coordinates",
+    description_fields: Optional[Sequence[str]] = None,
+) -> bool:
     """Save a list of record dictionaries to a KML file."""
 
     if not records:
@@ -391,16 +414,19 @@ def save_records_to_kml(records: List[Dict[str, object]], kml_file_path: str,
         with open(kml_file_path, 'wb') as kml_file:
             kml_file.write(kml_bytes)
 
-        logging.info(f"Data saved to KML file: {kml_file_path}")
+        logging.info("Data saved to KML file: %s", kml_file_path)
         return True
-    except Exception as e:
-        logging.error(f"Failed to write to KML file: {e}")
+    except Exception as error:
+        logging.error("Failed to write to KML file: %s", error)
         return False
 
 
-def save_records_to_kmz(records: List[Dict[str, object]], kmz_file_path: str,
-                        document_name: str = "Telegram Coordinates",
-                        description_fields: Optional[List[str]] = None) -> bool:
+def save_records_to_kmz(
+    records: Sequence[Dict[str, object]],
+    kmz_file_path: str,
+    document_name: str = "Telegram Coordinates",
+    description_fields: Optional[Sequence[str]] = None,
+) -> bool:
     """Save a list of record dictionaries to a KMZ archive."""
 
     if not records:
@@ -417,15 +443,19 @@ def save_records_to_kmz(records: List[Dict[str, object]], kmz_file_path: str,
         with zipfile.ZipFile(kmz_file_path, 'w', compression=zipfile.ZIP_DEFLATED) as kmz:
             kmz.writestr('doc.kml', kml_bytes)
 
-        logging.info(f"Data saved to KMZ file: {kmz_file_path}")
+        logging.info("Data saved to KMZ file: %s", kmz_file_path)
         return True
-    except Exception as e:
-        logging.error(f"Failed to write to KMZ file: {e}")
+    except Exception as error:
+        logging.error("Failed to write to KMZ file: %s", error)
         return False
 
 
-def save_dataframe_to_kml(df, kml_file_path: str, document_name: str = "Telegram Coordinates",
-                          description_fields: Optional[List[str]] = None) -> bool:
+def save_dataframe_to_kml(
+    df: Any,
+    kml_file_path: str,
+    document_name: str = "Telegram Coordinates",
+    description_fields: Optional[Sequence[str]] = None,
+) -> bool:
     """Save a pandas DataFrame to a KML file."""
 
     if df is None or getattr(df, 'empty', True):
@@ -435,14 +465,18 @@ def save_dataframe_to_kml(df, kml_file_path: str, document_name: str = "Telegram
     try:
         records = df.to_dict(orient='records')
     except AttributeError as exc:
-        logging.error(f"Data object does not support DataFrame-like export: {exc}")
+        logging.error("Data object does not support DataFrame-like export: %s", exc)
         return False
 
     return save_records_to_kml(records, kml_file_path, document_name, description_fields)
 
 
-def save_dataframe_to_kmz(df, kmz_file_path: str, document_name: str = "Telegram Coordinates",
-                          description_fields: Optional[List[str]] = None) -> bool:
+def save_dataframe_to_kmz(
+    df: Any,
+    kmz_file_path: str,
+    document_name: str = "Telegram Coordinates",
+    description_fields: Optional[Sequence[str]] = None,
+) -> bool:
     """Save a pandas DataFrame to a KMZ file."""
 
     if df is None or getattr(df, 'empty', True):
@@ -452,7 +486,7 @@ def save_dataframe_to_kmz(df, kmz_file_path: str, document_name: str = "Telegram
     try:
         records = df.to_dict(orient='records')
     except AttributeError as exc:
-        logging.error(f"Data object does not support DataFrame-like export: {exc}")
+        logging.error("Data object does not support DataFrame-like export: %s", exc)
         return False
 
     return save_records_to_kmz(records, kmz_file_path, document_name, description_fields)

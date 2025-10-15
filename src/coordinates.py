@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import logging
 import re
+from typing import Optional, Tuple
 
 # Regular expression for coordinate patterns
 # Matches both decimal and DMS formats
-COORDINATE_PATTERN = re.compile(
+COORDINATE_PATTERN: re.Pattern[str] = re.compile(
     r'(-?\d+\.\d+),\s*(-?\d+\.\d+)'  # Decimal format
     r'|'  # OR
     r'(\d+)[°\s](\d+)[\'\s](\d+(\.\d+)?)"?\s*([NS])[\s,]+(\d+)[°\s](\d+)[\'\s](\d+(\.\d+)?)"?\s*([EW])',  # DMS format
@@ -11,7 +14,12 @@ COORDINATE_PATTERN = re.compile(
 )
 
 
-def dms_to_decimal(degrees, minutes, seconds, direction):
+def dms_to_decimal(
+    degrees: float | int | str | None,
+    minutes: float | int | str | None,
+    seconds: float | int | str | None,
+    direction: str,
+) -> Optional[float]:
     """
     Converts coordinates from degrees-minutes-seconds (DMS) format to decimal
     format. This is commonly used to convert geographical coordinates into a
@@ -46,12 +54,12 @@ def dms_to_decimal(degrees, minutes, seconds, direction):
         if direction.upper() in ['S', 'W']:
             decimal = -decimal
         return decimal
-    except ValueError as e:
-        logging.error(f"Error converting DMS to decimal: {e}")
+    except ValueError as error:
+        logging.error("Error converting DMS to decimal: %s", error)
         return None
 
 
-def extract_coordinates(text):
+def extract_coordinates(text: str) -> Optional[Tuple[str, str]]:
     """
     Extract coordinates from text using the unified regex pattern.
 
@@ -91,7 +99,7 @@ def extract_coordinates(text):
     return None
 
 
-def contains_coordinates(text):
+def contains_coordinates(text: str) -> bool:
     """
     Check if text contains any coordinates.
 

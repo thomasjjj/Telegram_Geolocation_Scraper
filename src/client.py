@@ -1,9 +1,14 @@
+from __future__ import annotations
+
 import asyncio
 import logging
-import time
 import sys
+import time
+from typing import Any, AsyncIterator, Optional, Sequence, Tuple
+
 from telethon import TelegramClient
 from telethon.errors.rpcerrorlist import FloodWaitError
+
 from src.coordinates import extract_coordinates
 
 try:
@@ -18,7 +23,7 @@ except ImportError:
 class TelegramCoordinatesClient:
     """Client for extracting coordinates from Telegram messages."""
 
-    def __init__(self, api_id, api_hash, session_name="session_name"):
+    def __init__(self, api_id: int, api_hash: str, session_name: str = "session_name") -> None:
         """
         Initialize the Telegram client.
 
@@ -30,8 +35,8 @@ class TelegramCoordinatesClient:
         self.client = TelegramClient(session_name, api_id, api_hash)
         self.total_coordinates_found = 0
         self.total_messages_processed = 0
-        self.start_time = None
-        self.last_status_update = 0
+        self.start_time: Optional[float] = None
+        self.last_status_update = 0.0
         self.status_update_interval = 0.5  # Update status every 0.5 seconds
         self.last_count = 0  # For calculating processing rate
 
@@ -39,25 +44,25 @@ class TelegramCoordinatesClient:
         self.last_coordinate_line = None
         self.display_initialized = False
 
-    async def start(self):
+    async def start(self) -> bool:
         """Start the Telegram client."""
         try:
             await self.client.start()
             logging.info("Telegram client started successfully.")
             return True
-        except Exception as e:
-            logging.error(f"Failed to start the Telegram client: {e}")
+        except Exception as error:
+            logging.error("Failed to start the Telegram client: %s", error)
             return False
 
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         """Disconnect the Telegram client."""
         try:
             await self.client.disconnect()
             logging.info("Telegram client disconnected successfully.")
-        except Exception as e:
-            logging.error(f"Error disconnecting the client: {e}")
+        except Exception as error:
+            logging.error("Error disconnecting the client: %s", error)
 
-    def _get_elapsed_time(self):
+    def _get_elapsed_time(self) -> str:
         """Get elapsed time since search started in a readable format."""
         if not self.start_time:
             return "0s"
@@ -74,20 +79,20 @@ class TelegramCoordinatesClient:
             minutes = int((elapsed % 3600) // 60)
             return f"{hours}h {minutes}m"
 
-    def _get_processing_rate(self):
+    def _get_processing_rate(self) -> float:
         """Calculate the messages processing rate (messages per second)."""
         elapsed = time.time() - self.start_time
         if elapsed > 0:
             return self.total_messages_processed / elapsed
         return 0
 
-    def _format_coordinate_line(self, latitude, longitude, url):
+    def _format_coordinate_line(self, latitude: str, longitude: str, url: str) -> str:
         """Create a formatted coordinate line for console output."""
         if colorama_available:
             return f"{Fore.YELLOW}📍 {latitude}, {longitude} {Fore.BLUE}• {url}{Style.RESET_ALL}"
         return f"📍 {latitude}, {longitude} • {url}"
 
-    def _print_coordinate(self, latitude, longitude, url):
+    def _print_coordinate(self, latitude: str, longitude: str, url: str) -> None:
         """Print a coordinate to the terminal and prepare display for refresh."""
         coordinate_line = self._format_coordinate_line(latitude, longitude, url)
         print(coordinate_line)
@@ -95,7 +100,12 @@ class TelegramCoordinatesClient:
         # Ensure the next progress update prints on a new line below the coordinate history
         self.display_initialized = False
 
-    def _update_progress_display(self, coordinates_found, force=False, latest_coordinate=None):
+    def _update_progress_display(
+        self,
+        coordinates_found: int,
+        force: bool = False,
+        latest_coordinate: Optional[Tuple[str, str, str]] = None,
+    ) -> None:
         """Update the progress display with current stats."""
         current_time = time.time()
         # Only update at certain intervals to avoid excessive screen updates
@@ -151,7 +161,7 @@ class TelegramCoordinatesClient:
         self.display_initialized = True
 
     @staticmethod
-    def _format_wait_duration(seconds):
+    def _format_wait_duration(seconds: int | float) -> str:
         """Return a human-readable wait duration string."""
         if seconds >= 3600:
             hours = int(seconds // 3600)
@@ -163,7 +173,7 @@ class TelegramCoordinatesClient:
             return f"{minutes}m {remaining_seconds}s"
         return f"{int(seconds)}s"
 
-    async def _iter_messages_with_retry(self, channel_entity, search_term):
+    async def _iter_messages_with_retry(self, channel_entity: Any, search_term: str) -> AsyncIterator[Any]:
         """Iterate over messages while handling Telegram flood wait errors."""
         offset_id = 0
 
@@ -177,8 +187,8 @@ class TelegramCoordinatesClient:
                     yield message
                     offset_id = message.id
                 break
-            except FloodWaitError as e:
-                wait_seconds = max(e.seconds, 0)
+            except FloodWaitError as error:
+                wait_seconds = max(error.seconds, 0)
                 sleep_duration = wait_seconds + 1
                 wait_message = (
                     f"Flood wait encountered while searching for '{search_term}'. "
@@ -188,7 +198,7 @@ class TelegramCoordinatesClient:
                 print(wait_message)
                 await asyncio.sleep(sleep_duration)
 
-    def _log_progress(self, message_count, coordinate_count, is_final=False):
+    def _log_progress(self, message_count: int, coordinate_count: int, is_final: bool = False) -> None:
         """Log progress information."""
         elapsed = self._get_elapsed_time()
 
@@ -206,7 +216,12 @@ class TelegramCoordinatesClient:
                 f"found {coordinate_count} coordinates"
             )
 
-    async def search_channel(self, channel_entity, search_terms, writer):
+    async def search_channel(
+        self,
+        channel_entity: Any,
+        search_terms: Sequence[str],
+        writer: Any,
+    ) -> int:
         """
         Search a specific channel for coordinates.
 
@@ -289,8 +304,13 @@ class TelegramCoordinatesClient:
                         # Update display even if no coordinates found
                         self._update_progress_display(coordinates_found)
 
-            except Exception as e:
-                logging.error(f"An error occurred while searching for term '{search_term}' in {channel_name}: {e}")
+            except Exception as error:
+                logging.error(
+                    "An error occurred while searching for term '%s' in %s: %s",
+                    search_term,
+                    channel_name,
+                    error,
+                )
 
         # Final update with force=True to ensure it's displayed
         self._update_progress_display(coordinates_found, force=True)
@@ -300,7 +320,7 @@ class TelegramCoordinatesClient:
             f"Completed search in channel {channel_name}: Found {coordinates_found} coordinates in {messages_processed} messages")
         return coordinates_found
 
-    async def search_all_chats(self, search_terms, writer):
+    async def search_all_chats(self, search_terms: Sequence[str], writer: Any) -> int:
         """
         Search all available chats for coordinates.
 
@@ -354,8 +374,8 @@ class TelegramCoordinatesClient:
                     f"Chat {chats_processed}/{total_chats} complete - Running total: {total_found} coordinates found")
                 print(f"Chat {chats_processed}/{total_chats} complete - Running total: {total_found} coordinates found")
 
-        except Exception as e:
-            logging.error(f"Error retrieving dialogs: {e}")
+        except Exception as error:
+            logging.error("Error retrieving dialogs: %s", error)
 
         elapsed = self._get_elapsed_time()
         # Final summary for clarity
@@ -367,7 +387,7 @@ class TelegramCoordinatesClient:
             f"Search completed in {elapsed}: Searched {chats_processed} chats, processed {self.total_messages_processed} messages, found {total_found} coordinates")
         return total_found
 
-    async def get_entity(self, channel_identifier):
+    async def get_entity(self, channel_identifier: str | int) -> Any | None:
         """
         Get a Telegram entity by username or ID.
 
@@ -383,6 +403,10 @@ class TelegramCoordinatesClient:
             entity_name = getattr(entity, 'title', str(entity.id)) if hasattr(entity, 'id') else str(entity)
             logging.info(f"Entity resolved: {entity_name}")
             return entity
-        except Exception as e:
-            logging.error(f"Could not find a channel or group with the identifier '{channel_identifier}'. Error: {e}")
+        except Exception as error:
+            logging.error(
+                "Could not find a channel or group with the identifier '%s'. Error: %s",
+                channel_identifier,
+                error,
+            )
             return None
