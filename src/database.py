@@ -19,7 +19,7 @@ import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -357,6 +357,41 @@ class CoordinatesDatabase:
             cursor.lastrowid,
         )
         return int(cursor.lastrowid)
+
+    def bulk_add_coordinates(
+        self,
+        coordinates: List[Tuple[int, float, float]],
+        coordinate_format: Optional[str] = "decimal",
+        extraction_confidence: Optional[str] = "high",
+    ) -> int:
+        """Insert multiple coordinates in a single transaction."""
+
+        if not coordinates:
+            return 0
+
+        sql = (
+            "INSERT INTO coordinates (message_ref, latitude, longitude, coordinate_format, "
+            "extraction_confidence) VALUES (?, ?, ?, ?, ?)"
+        )
+
+        normalized_coordinates = [
+            (
+                message_ref,
+                float(latitude),
+                float(longitude),
+                coordinate_format,
+                extraction_confidence,
+            )
+            for message_ref, latitude, longitude in coordinates
+        ]
+
+        connection = self.connect()
+        with connection:
+            cursor = connection.executemany(sql, normalized_coordinates)
+
+        inserted = max(cursor.rowcount or 0, 0)
+        LOGGER.info("Bulk inserted %s coordinates", inserted)
+        return inserted
 
     def get_coordinates_by_channel(self, channel_id: int) -> List[sqlite3.Row]:
         sql = (
