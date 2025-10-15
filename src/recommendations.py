@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from telethon import TelegramClient
+from telethon.errors import RPCError
 from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
 from src.database import CoordinatesDatabase
@@ -269,7 +270,7 @@ class RecommendationManager:
     async def enrich_recommendation(self, client: TelegramClient, channel_id: int) -> bool:
         try:
             entity = await client.get_entity(channel_id)
-        except Exception as exc:  # pragma: no cover - Telethon RPC errors
+        except (RPCError, ValueError) as exc:  # pragma: no cover - Telethon RPC errors
             LOGGER.warning("Failed to fetch entity for channel %s: %s", channel_id, exc)
             self.db.update_recommended_channel(
                 channel_id,

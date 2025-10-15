@@ -7,12 +7,14 @@ import datetime
 import logging
 import os
 import re
+import sqlite3
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import pandas as pd
 from telethon import TelegramClient
+from telethon.errors import RPCError
 from telethon.tl.types import Channel, Chat, MessageMediaDocument, MessageMediaPhoto
 
 from src.coordinates import extract_coordinates
@@ -213,7 +215,7 @@ async def scrape_channel(
                         has_coordinates=has_coordinates,
                         message_row_id=row_id if row_id else None,
                     )
-                except Exception as exc:  # pragma: no cover - defensive logging
+                except (sqlite3.DatabaseError, TypeError, ValueError) as exc:  # pragma: no cover - defensive logging
                     LOGGER.debug("Recommendation processing failed for message %s: %s", message.id, exc)
 
         if database and coordinate_batch:
@@ -223,7 +225,7 @@ async def scrape_channel(
         if database:
             database.update_channel_statistics(resolved_channel_id)
 
-    except Exception as error:  # pragma: no cover - Telethon errors hard to simulate in tests
+    except (sqlite3.DatabaseError, RPCError, ValueError) as error:  # pragma: no cover - Telethon errors hard to simulate in tests
         LOGGER.error("Error scraping channel %s: %s", channel_id, error)
 
     return (
@@ -411,7 +413,7 @@ def channel_scraper(
 
                     create_map(df, map_output, visualization_type=visualization_type)
                     LOGGER.info("Interactive map generated at %s", map_output)
-                except Exception as exc:  # pragma: no cover - best-effort visualisation
+                except (OSError, ValueError, sqlite3.DatabaseError, pd.errors.ParserError) as exc:  # pragma: no cover - best-effort visualisation
                     LOGGER.warning("Failed to create interactive map: %s", exc)
     else:
         LOGGER.info("No coordinates found.")

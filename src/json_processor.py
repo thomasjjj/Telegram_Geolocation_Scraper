@@ -226,7 +226,7 @@ def process_telegram_json(json_file_path, post_link_base):
             f"JSON processing completed in {time_str}: Processed {messages_processed} messages, found {len(messages_with_coordinates)} coordinates")
         return df
 
-    except Exception as e:
+    except (OSError, json.JSONDecodeError, ValueError) as e:
         logging.error(f"Error processing JSON file: {e}")
         # Print a newline in case exception occurred during progress display
         print()
@@ -265,7 +265,7 @@ def save_dataframe_to_csv(df, csv_file_path):
         print(f"\rSave completed in {elapsed:.2f} seconds      ")
         logging.info(f"DataFrame successfully saved to CSV file in {elapsed:.2f} seconds: {csv_file_path}")
         return True
-    except Exception as e:
+    except (OSError, ValueError, AttributeError) as e:
         logging.error(f"Failed to save DataFrame to CSV: {e}")
         print(f"\rError: Failed to save DataFrame to CSV: {e}      ")
         return False
