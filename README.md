@@ -98,6 +98,28 @@ You'll be prompted to choose one of three options:
 2. **Search all accessible chats**: The script will scan all chats you have access to
 3. **Process a JSON export**: Process an exported Telegram chat history file
 
+#### Searching All Accessible Chats
+
+The **Search all accessible chats** option scans every channel and group you can access for geolocation keywords.
+
+1. Select **Advanced Options → Search all accessible chats**.
+2. Configure the search when prompted:
+   - **Time limit** – Restrict the search to messages from the last *N* days (optional).
+   - **Messages per chat** – Number of messages to analyse in each chat (default: 200, up to 1000).
+3. Confirm to start the search.
+4. Monitor the real-time progress display showing:
+   - Chats checked
+   - Matches found
+   - Messages scanned
+   - Processing rate
+5. Press `Ctrl+C` at any time to cancel the search. Partial results are preserved.
+
+**Performance tips:**
+
+- Limit the search to recent messages (e.g., 30 days) for faster results.
+- Reduce the messages-per-chat limit (e.g., 50) for quick exploratory scans.
+- Increase the message limit (up to 1000) for deeper, more thorough searches.
+
 ### Command-line Arguments
 
 For automated usage, you can use command-line arguments:
@@ -198,6 +220,22 @@ Google Earth, QGIS, or ArcGIS.
 ### Integrated Kepler.gl Maps
 
 Use the built-in menu under **Advanced Options → Visualise coordinates (Kepler.gl)** to create interactive, shareable maps without leaving the scraper. The visualiser supports multiple presets (points, heatmap, clusters, hexagons, arcs, temporal animations) and outputs standalone HTML files ready for publication. For automation, pass `auto_visualize=True` to `channel_scraper` and a map will be generated alongside your CSV export. Refer to [docs/VISUALIZATION.md](docs/VISUALIZATION.md) for detailed guidance and advanced configuration tips.
+
+## Troubleshooting
+
+### "Search all chats" takes too long
+
+- Limit the search to recent messages (e.g., last 30 days).
+- Reduce the messages-per-chat limit (try 50–100 instead of 200).
+- Cancel with `Ctrl+C` and retry with narrower parameters or by selecting specific chats.
+
+### Progress seems stuck
+
+Long gaps usually occur while scanning chats with thousands of messages or when Telegram enforces rate limits.
+
+- Wait 30 seconds to see if the progress counter updates.
+- Review the log output for details.
+- Cancel with `Ctrl+C` and restart with tighter limits if needed.
 
 ### Google Earth
 
