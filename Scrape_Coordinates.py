@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import datetime
+import json
 import logging
 import os
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from dotenv import load_dotenv, set_key
 
@@ -15,6 +17,7 @@ from src.channel_scraper import channel_scraper
 from src.database import CoordinatesDatabase
 from src.db_migration import detect_and_migrate_all_results, migrate_existing_csv_to_database
 from src.json_processor import process_telegram_json, save_dataframe_to_csv
+from src.recommendations import RecommendationManager
 
 try:
     from telethon import TelegramClient
@@ -60,9 +63,10 @@ Choose an option:
 4. Scan all known channels with coordinates
 5. View database statistics
 6. Manage database
-7. Exit
+7. Manage recommended channels
+8. Exit
 
-Enter your choice (1-7): """
+Enter your choice (1-8): """
 
 
 def configure_logging() -> None:
@@ -283,7 +287,125 @@ def _derive_output_path(base_path: str, new_extension: str) -> str:
     return base + new_extension
 
 
-def handle_specific_channel(database: Optional[CoordinatesDatabase], db_config: dict, api_id: int, api_hash: str) -> None:
+def _decode_sources(record: Dict[str, Any]) -> List[int]:
+    value = record.get("discovered_from_channels")
+    if not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if isinstance(decoded, list):
+        return [int(item) for item in decoded if isinstance(item, int)]
+    return []
+
+
+def _format_recommendation_line(index: int, recommendation: Dict[str, Any]) -> str:
+    username = recommendation.get("username")
+    title = recommendation.get("title") or username or f"ID:{recommendation['channel_id']}"
+    username_display = f"@{username}" if username else f"ID:{recommendation['channel_id']}"
+    score = recommendation.get("recommendation_score", 0.0)
+    forward_count = int(recommendation.get("forward_count") or 0)
+    coord_count = int(recommendation.get("coordinate_forward_count") or 0)
+    sources = _decode_sources(recommendation)
+
+    if score >= 70:
+        indicator = "🔥"
+    elif score >= 50:
+        indicator = "⭐"
+    else:
+        indicator = "📌"
+
+    line = [
+        f"{index}. {indicator} {title} ({username_display})",
+        f"   Score: {score:.1f}/100 | {coord_count}/{forward_count} forwards contained coordinates",
+    ]
+    if sources:
+        line.append(f"   Forwarded by {len(sources)} tracked channel(s)")
+    return "\n".join(line)
+
+
+def show_startup_recommendations(
+    recommendation_manager: Optional[RecommendationManager],
+    database: Optional[CoordinatesDatabase],
+    db_config: dict,
+    api_id: int,
+    api_hash: str,
+) -> None:
+    if not recommendation_manager or not recommendation_manager.settings.show_at_startup:
+        return
+
+    stats = recommendation_manager.get_recommendation_statistics()
+    if stats.get("pending", 0) == 0:
+        return
+
+    print("\n" + "=" * 60)
+    print("📢 RECOMMENDED CHANNELS DISCOVERED")
+    print("=" * 60)
+    print(
+        f"Found {stats['pending']} channel(s) that frequently forward coordinates across "
+        f"{stats['coordinate_forwards']} analysed forwards."
+    )
+    print()
+
+    top_recommendations = recommendation_manager.get_top_recommendations(
+        limit=recommendation_manager.settings.max_display
+    )
+
+    if not top_recommendations:
+        print("No recommendations met the minimum score threshold.")
+        return
+
+    print("Top recommendations:\n")
+    for idx, recommendation in enumerate(top_recommendations, start=1):
+        print(_format_recommendation_line(idx, recommendation))
+        print()
+
+    print("Options:")
+    print("  S - Scrape all recommended channels now")
+    print("  T - Scrape the top recommendations")
+    print("  V - Open recommendation management menu")
+    print("  L - Skip and continue to main menu")
+    print()
+
+    choice = input("Enter choice (S/T/V/L): ").strip().upper()
+    if choice == "S":
+        scrape_recommended_channels_menu(
+            recommendation_manager,
+            database,
+            db_config,
+            api_id,
+            api_hash,
+            mode="all",
+        )
+    elif choice == "T":
+        scrape_recommended_channels_menu(
+            recommendation_manager,
+            database,
+            db_config,
+            api_id,
+            api_hash,
+            mode="top",
+        )
+    elif choice == "V":
+        handle_recommendation_management(
+            recommendation_manager,
+            database,
+            db_config,
+            api_id,
+            api_hash,
+        )
+    else:
+        print("Continuing to main menu...\n")
+
+
+def handle_specific_channel(
+    database: Optional[CoordinatesDatabase],
+    db_config: dict,
+    api_id: int,
+    api_hash: str,
+    recommendation_manager: Optional[RecommendationManager],
+) -> None:
     session_name = input("Enter the session name (press Enter for default 'simple_scraper'): ").strip() or "simple_scraper"
     channels = prompt_channel_selection(api_id, api_hash, session_name)
     date_limit = prompt_date_limit()
@@ -302,10 +424,17 @@ def handle_specific_channel(database: Optional[CoordinatesDatabase], db_config: 
         skip_existing=db_config.get("skip_existing", True),
         db_path=db_config.get("path"),
         database=database,
+        recommendation_manager=recommendation_manager,
     )
 
 
-def handle_search_all_chats(database: Optional[CoordinatesDatabase], db_config: dict, api_id: int, api_hash: str) -> None:
+def handle_search_all_chats(
+    database: Optional[CoordinatesDatabase],
+    db_config: dict,
+    api_id: int,
+    api_hash: str,
+    recommendation_manager: Optional[RecommendationManager],
+) -> None:
     session_name = input("Enter the session name (press Enter for default 'simple_scraper'): ").strip() or "simple_scraper"
     results = asyncio.run(
         _search_dialogs_for_keywords(api_id=api_id, api_hash=api_hash, session_name=session_name, keywords=DEFAULT_GEO_KEYWORDS)
@@ -357,9 +486,378 @@ def handle_search_all_chats(database: Optional[CoordinatesDatabase], db_config: 
         skip_existing=db_config.get("skip_existing", True),
         db_path=db_config.get("path"),
         database=database,
+        recommendation_manager=recommendation_manager,
     )
 
 
+def scrape_recommended_channels_menu(
+    recommendation_manager: Optional[RecommendationManager],
+    database: Optional[CoordinatesDatabase],
+    db_config: dict,
+    api_id: int,
+    api_hash: str,
+    mode: str = "interactive",
+) -> None:
+    if not recommendation_manager:
+        print("Recommendation system is disabled.")
+        return
+
+    if mode == "all":
+        recommendations = recommendation_manager.list_recommendations(status="pending")
+    elif mode == "top":
+        recommendations = recommendation_manager.get_top_recommendations(limit=recommendation_manager.settings.max_display)
+    else:
+        print("\nScrape Recommended Channels")
+        print("-" * 40)
+        print("1. Scrape all pending recommendations")
+        print("2. Scrape top N recommendations")
+        print("3. Scrape specific recommendations")
+        print("4. Back")
+        print()
+
+        choice = input("Enter choice (1-4): ").strip()
+        if choice == "1":
+            recommendations = recommendation_manager.list_recommendations(status="pending")
+        elif choice == "2":
+            limit_input = input("How many top recommendations to scrape? ").strip()
+            try:
+                limit = int(limit_input)
+            except ValueError:
+                print("Invalid number. Aborting.")
+                return
+            recommendations = recommendation_manager.get_top_recommendations(limit=limit)
+        elif choice == "3":
+            view_all_recommendations(recommendation_manager)
+            indices_input = input("Enter recommendation numbers to scrape (comma-separated): ").strip()
+            indices: List[int] = []
+            for item in indices_input.split(","):
+                item = item.strip()
+                if item.isdigit():
+                    indices.append(int(item))
+            pending = recommendation_manager.list_recommendations(status="pending")
+            recommendations = [pending[i - 1] for i in indices if 1 <= i <= len(pending)]
+        else:
+            return
+
+    if not recommendations:
+        print("No recommendations selected for scraping.")
+        return
+
+    _run_recommended_scrape(
+        recommendation_manager,
+        database,
+        db_config,
+        api_id,
+        api_hash,
+        recommendations,
+    )
+
+
+def _run_recommended_scrape(
+    recommendation_manager: RecommendationManager,
+    database: Optional[CoordinatesDatabase],
+    db_config: dict,
+    api_id: int,
+    api_hash: str,
+    recommendations: List[Dict[str, Any]],
+) -> None:
+    identifiers: List[str] = []
+    for recommendation in recommendations:
+        username = recommendation.get("username")
+        identifiers.append(username or str(recommendation["channel_id"]))
+
+    print(f"Preparing to scrape {len(identifiers)} channel(s).")
+    confirm = input("Continue? (y/N): ").strip().lower()
+    if confirm != "y":
+        print("Cancelled.")
+        return
+
+    output_default = os.path.join(
+        "results",
+        f"recommended_channels_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv",
+    )
+    output_path = input(f"Enter output CSV path (default {output_default}): ").strip() or output_default
+    date_limit = input("Enter date limit (YYYY-MM-DD, or press Enter for no limit): ").strip() or None
+
+    channel_scraper(
+        channel_links=identifiers,
+        date_limit=date_limit,
+        output_path=output_path,
+        api_id=api_id,
+        api_hash=api_hash,
+        session_name="recommended_scrape",
+        use_database=db_config.get("enabled", True) and database is not None,
+        skip_existing=db_config.get("skip_existing", True),
+        db_path=db_config.get("path"),
+        database=database,
+        recommendation_manager=recommendation_manager,
+    )
+
+    for recommendation in recommendations:
+        recommendation_manager.mark_recommendation_status(
+            recommendation["channel_id"],
+            "scraped",
+            notes=f"Scraped to {output_path}",
+        )
+
+    print(f"\n✅ Scraping complete! Results saved to: {output_path}")
+
+
+def handle_recommendation_management(
+    recommendation_manager: Optional[RecommendationManager],
+    database: Optional[CoordinatesDatabase],
+    db_config: dict,
+    api_id: int,
+    api_hash: str,
+) -> None:
+    if not recommendation_manager or not recommendation_manager.settings.enabled:
+        print("Recommendation system is disabled.")
+        return
+
+    while True:
+        print("\n" + "=" * 60)
+        print("RECOMMENDED CHANNELS MANAGEMENT")
+        print("=" * 60)
+
+        stats = recommendation_manager.get_recommendation_statistics()
+        print(f"Total Recommended: {stats['total_recommended']}")
+        print(f"  Pending: {stats['pending']}")
+        print(f"  Accepted: {stats['accepted']}")
+        print(f"  Rejected: {stats['rejected']}")
+        print(f"  Inaccessible: {stats['inaccessible']}")
+        print()
+
+        print("Options:")
+        print("  1. View all pending recommendations")
+        print("  2. View top recommendations")
+        print("  3. Search recommendations")
+        print("  4. Scrape recommended channels")
+        print("  5. Accept/Reject recommendations")
+        print("  6. Enrich recommendations (fetch channel details)")
+        print("  7. Export recommendations to CSV")
+        print("  8. View forward analysis")
+        print("  9. Back to main menu")
+        print()
+
+        choice = input("Enter choice (1-9): ").strip()
+
+        if choice == "1":
+            view_all_recommendations(recommendation_manager)
+        elif choice == "2":
+            view_top_recommendations(recommendation_manager)
+        elif choice == "3":
+            search_recommendations_cli(recommendation_manager)
+        elif choice == "4":
+            scrape_recommended_channels_menu(
+                recommendation_manager,
+                database,
+                db_config,
+                api_id,
+                api_hash,
+            )
+        elif choice == "5":
+            accept_reject_recommendations(recommendation_manager)
+        elif choice == "6":
+            enrich_recommendations_cli(recommendation_manager, api_id, api_hash)
+        elif choice == "7":
+            export_recommendations_cli(recommendation_manager)
+        elif choice == "8":
+            view_forward_analysis(recommendation_manager)
+        elif choice == "9":
+            break
+        else:
+            print("Invalid choice. Please try again.")
+
+
+def view_all_recommendations(recommendation_manager: RecommendationManager) -> None:
+    recommendations = recommendation_manager.list_recommendations(status="pending", limit=100)
+    if not recommendations:
+        print("\nNo pending recommendations found.")
+        return
+
+    print("\n#   Score   Username/ID                 Forwards   Coords   Sources")
+    print("-" * 80)
+    for idx, recommendation in enumerate(recommendations, start=1):
+        username = recommendation.get("username")
+        username_display = f"@{username}" if username else f"ID:{recommendation['channel_id']}"
+        score = recommendation.get("recommendation_score", 0.0)
+        forward_count = int(recommendation.get("forward_count") or 0)
+        coord_count = int(recommendation.get("coordinate_forward_count") or 0)
+        sources = len(_decode_sources(recommendation))
+        print(
+            f"{idx:<3} {score:>6.1f}  {username_display:<25} {forward_count:<9} {coord_count:<7} {sources:<7}"
+        )
+
+
+def view_top_recommendations(recommendation_manager: RecommendationManager, limit: int = 10) -> None:
+    recommendations = recommendation_manager.get_top_recommendations(limit=limit)
+    if not recommendations:
+        print("No recommendations meet the minimum score threshold.")
+        return
+
+    print()
+    for idx, recommendation in enumerate(recommendations, start=1):
+        print(_format_recommendation_line(idx, recommendation))
+        print()
+
+
+def search_recommendations_cli(recommendation_manager: RecommendationManager) -> None:
+    term = input("Enter search term (username, title, or ID): ").strip()
+    if not term:
+        print("Search term is required.")
+        return
+    results = recommendation_manager.search_recommendations(term)
+    if not results:
+        print("No recommendations matched your search.")
+        return
+    print()
+    for idx, recommendation in enumerate(results, start=1):
+        print(_format_recommendation_line(idx, recommendation))
+        print()
+
+
+def accept_reject_recommendations(recommendation_manager: RecommendationManager) -> None:
+    recommendations = recommendation_manager.get_top_recommendations(limit=20, min_score=0.0)
+    if not recommendations:
+        print("No pending recommendations available for review.")
+        return
+
+    for idx, recommendation in enumerate(recommendations, start=1):
+        print("\n" + "=" * 60)
+        print(f"Recommendation {idx}/{len(recommendations)}")
+        print("=" * 60)
+        username = recommendation.get("username")
+        title = recommendation.get("title") or username or f"ID:{recommendation['channel_id']}"
+        print(f"Channel: {title}")
+        print(f"Identifier: @{username}" if username else f"ID: {recommendation['channel_id']}")
+        print(f"Score: {recommendation.get('recommendation_score', 0.0):.1f}/100")
+        print(
+            f"Forwards seen: {recommendation.get('forward_count', 0)} "
+            f"({recommendation.get('coordinate_forward_count', 0)} with coordinates)"
+        )
+        print(f"First seen: {recommendation.get('first_seen', 'Unknown')}")
+        print(f"Last seen: {recommendation.get('last_seen', 'Unknown')}")
+        sources = _decode_sources(recommendation)
+        if sources:
+            print(f"Forwarded by {len(sources)} tracked channel(s)")
+
+        print()
+        print("Options: A - Accept | R - Reject | S - Skip | Q - Quit")
+        decision = input("Enter choice (A/R/S/Q): ").strip().upper()
+
+        if decision == "A":
+            notes = input("Add notes (optional): ").strip() or None
+            recommendation_manager.mark_recommendation_status(
+                recommendation["channel_id"],
+                "accepted",
+                notes,
+            )
+            print("✅ Accepted!")
+        elif decision == "R":
+            reason = input("Reason for rejection (optional): ").strip() or None
+            recommendation_manager.mark_recommendation_status(
+                recommendation["channel_id"],
+                "rejected",
+                reason,
+            )
+            print("❌ Rejected.")
+        elif decision == "Q":
+            break
+        else:
+            print("⏭️  Skipped.")
+
+
+def enrich_recommendations_cli(
+    recommendation_manager: RecommendationManager,
+    api_id: int,
+    api_hash: str,
+) -> None:
+    recommendations = recommendation_manager.list_recommendations(limit=100, order_by="last_seen DESC")
+    if not recommendations:
+        print("No recommendations available for enrichment.")
+        return
+
+    confirm = input(f"Fetch details for {len(recommendations)} recommendation(s)? (y/N): ").strip().lower()
+    if confirm != "y":
+        return
+
+    session_name = os.environ.get("TELEGRAM_SESSION_NAME", "recommendation_enrichment")
+
+    async def enrich_all() -> None:
+        async with TelegramClient(session_name, api_id, api_hash) as client:
+            enriched = failed = 0
+            for recommendation in recommendations:
+                success = await recommendation_manager.enrich_recommendation(
+                    client,
+                    recommendation["channel_id"],
+                )
+                if success:
+                    enriched += 1
+                else:
+                    failed += 1
+            print(f"\nEnrichment complete. Success: {enriched}, Failed: {failed}")
+
+    try:
+        asyncio.run(enrich_all())
+    except Exception as exc:  # pragma: no cover - Telethon runtime errors
+        logging.error("Failed to enrich recommendations: %s", exc)
+
+
+def export_recommendations_cli(recommendation_manager: RecommendationManager) -> None:
+    status = input("Export which status? (pending/accepted/rejected/all) [pending]: ").strip().lower() or "pending"
+    if status == "all":
+        records = recommendation_manager.export_recommendations(status=None)
+    else:
+        records = recommendation_manager.export_recommendations(status=status)
+
+    if not records:
+        print("No recommendations found for export.")
+        return
+
+    output_path = input("Enter CSV export path (default results/recommendations.csv): ").strip() or "results/recommendations.csv"
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    fieldnames = sorted({key for record in records for key in record.keys()})
+    with open(output_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            writer.writerow(record)
+
+    print(f"Exported {len(records)} recommendation(s) to {output_path}")
+
+
+def view_forward_analysis(recommendation_manager: RecommendationManager) -> None:
+    rows = recommendation_manager.db.query(
+        """
+        SELECT rc.channel_id,
+               rc.username,
+               rc.title,
+               rc.recommendation_score,
+               COUNT(cf.id) AS forward_count,
+               SUM(CASE WHEN cf.had_coordinates = 1 THEN 1 ELSE 0 END) AS coord_count,
+               COUNT(DISTINCT cf.to_channel_id) AS source_diversity
+        FROM recommended_channels rc
+        JOIN channel_forwards cf ON cf.from_channel_id = rc.channel_id
+        GROUP BY rc.channel_id
+        ORDER BY coord_count DESC, forward_count DESC
+        LIMIT 20
+        """
+    )
+
+    if not rows:
+        print("No forward analysis data available yet.")
+        return
+
+    print("\nRecommended Channel                 Score   Forwards  w/Coords  Sources")
+    print("-" * 90)
+    for row in rows:
+        username = row["username"]
+        title = row["title"] or username or f"ID:{row['channel_id']}"
+        print(
+            f"{title:<35} {row['recommendation_score']:<7.1f} {row['forward_count']:<9} "
+            f"{row['coord_count']:<9} {row['source_diversity']:<7}"
+        )
 def handle_process_json(database: Optional[CoordinatesDatabase]) -> None:
     json_file = input("Enter the path to the Telegram JSON export: ").strip()
     if not json_file:
@@ -387,7 +885,13 @@ def handle_process_json(database: Optional[CoordinatesDatabase]) -> None:
             print(f"Imported {imported} coordinate rows into the database.")
 
 
-def handle_scan_known_channels(database: Optional[CoordinatesDatabase], db_config: dict, api_id: int, api_hash: str) -> None:
+def handle_scan_known_channels(
+    database: Optional[CoordinatesDatabase],
+    db_config: dict,
+    api_id: int,
+    api_hash: str,
+    recommendation_manager: Optional[RecommendationManager],
+) -> None:
     if not database:
         print("Database support is disabled.")
         return
@@ -449,6 +953,7 @@ def handle_scan_known_channels(database: Optional[CoordinatesDatabase], db_confi
         skip_existing=db_config.get("skip_existing", True),
         db_path=db_config.get("path"),
         database=database,
+        recommendation_manager=recommendation_manager,
     )
 
     print(f"Scan complete. Results stored in {output_path}")
@@ -558,26 +1063,43 @@ def main() -> None:
 
     db_config = get_database_configuration()
     database = CoordinatesDatabase(db_config["path"]) if db_config["enabled"] else None
+    recommendation_manager = RecommendationManager(database) if database else None
+
+    show_startup_recommendations(
+        recommendation_manager,
+        database,
+        db_config,
+        api_id,
+        api_hash,
+    )
 
     while True:
         choice = input(MAIN_MENU).strip()
         if choice == "1":
-            handle_specific_channel(database, db_config, api_id, api_hash)
+            handle_specific_channel(database, db_config, api_id, api_hash, recommendation_manager)
         elif choice == "2":
-            handle_search_all_chats(database, db_config, api_id, api_hash)
+            handle_search_all_chats(database, db_config, api_id, api_hash, recommendation_manager)
         elif choice == "3":
             handle_process_json(database)
         elif choice == "4":
-            handle_scan_known_channels(database, db_config, api_id, api_hash)
+            handle_scan_known_channels(database, db_config, api_id, api_hash, recommendation_manager)
         elif choice == "5":
             handle_database_statistics(database)
         elif choice == "6":
             handle_database_management(database)
         elif choice == "7":
+            handle_recommendation_management(
+                recommendation_manager,
+                database,
+                db_config,
+                api_id,
+                api_hash,
+            )
+        elif choice == "8":
             print("Goodbye!")
             break
         else:
-            print("Invalid selection. Please choose an option from 1 to 7.")
+            print("Invalid selection. Please choose an option from 1 to 8.")
 
 
 if __name__ == "__main__":  # pragma: no cover - interactive entry point

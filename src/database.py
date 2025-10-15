@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
+import json
 import logging
 import shutil
 import sqlite3
@@ -132,6 +133,67 @@ class CoordinatesDatabase:
             "CREATE INDEX IF NOT EXISTS idx_messages_coordinates ON messages(has_coordinates)",
             "CREATE INDEX IF NOT EXISTS idx_coordinates_message ON coordinates(message_ref)",
             "CREATE INDEX IF NOT EXISTS idx_channels_density ON channels(coordinate_density DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS recommended_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER UNIQUE NOT NULL,
+                username TEXT,
+                title TEXT,
+                channel_type TEXT,
+                first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                discovered_from_channels TEXT,
+                forward_count INTEGER DEFAULT 1,
+                coordinate_forward_count INTEGER DEFAULT 1,
+                recommendation_score REAL DEFAULT 0.0,
+                user_status TEXT DEFAULT 'pending',
+                user_notes TEXT,
+                added_to_scrape_list DATETIME,
+                last_scraped DATETIME,
+                is_accessible BOOLEAN,
+                requires_join BOOLEAN,
+                total_messages INTEGER,
+                estimated_coordinate_density REAL,
+                actual_coordinate_density REAL,
+                is_verified BOOLEAN DEFAULT 0,
+                is_scam BOOLEAN DEFAULT 0,
+                is_fake BOOLEAN DEFAULT 0,
+                avg_message_views INTEGER,
+                subscriber_count INTEGER,
+                UNIQUE(channel_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS channel_forwards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_ref INTEGER NOT NULL,
+                from_channel_id INTEGER NOT NULL,
+                to_channel_id INTEGER NOT NULL,
+                forward_date DATETIME,
+                had_coordinates BOOLEAN DEFAULT 0,
+                forward_signature TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (message_ref) REFERENCES messages(id) ON DELETE CASCADE,
+                FOREIGN KEY (from_channel_id) REFERENCES recommended_channels(channel_id),
+                FOREIGN KEY (to_channel_id) REFERENCES channels(id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS recommendation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                event_details TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (channel_id) REFERENCES recommended_channels(channel_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_recommended_score ON recommended_channels(recommendation_score DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_recommended_status ON recommended_channels(user_status)",
+            "CREATE INDEX IF NOT EXISTS idx_forwards_from ON channel_forwards(from_channel_id)",
+            "CREATE INDEX IF NOT EXISTS idx_forwards_to ON channel_forwards(to_channel_id)",
+            "CREATE INDEX IF NOT EXISTS idx_forwards_coordinates ON channel_forwards(had_coordinates)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_forwards_unique ON channel_forwards(message_ref, from_channel_id, to_channel_id)",
         ]
 
         connection = self.connect()
@@ -474,6 +536,233 @@ class CoordinatesDatabase:
             (limit,),
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Recommendation system helpers
+
+    def query(self, sql: str, params: Sequence[Any] | None = None) -> List[sqlite3.Row]:
+        cursor = self.connect().execute(sql, params or [])
+        return cursor.fetchall()
+
+    def query_one(self, sql: str, params: Sequence[Any] | None = None) -> Optional[sqlite3.Row]:
+        cursor = self.connect().execute(sql, params or [])
+        return cursor.fetchone()
+
+    def count(
+        self,
+        table: str,
+        where: Optional[str] = None,
+        params: Sequence[Any] | None = None,
+    ) -> int:
+        sql = f"SELECT COUNT(*) FROM {table}"
+        if where:
+            sql += f" WHERE {where}"
+        row = self.connect().execute(sql, params or []).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+    def get_recommended_channel(self, channel_id: int) -> Optional[Dict[str, Any]]:
+        row = self.query_one(
+            "SELECT * FROM recommended_channels WHERE channel_id=?",
+            (channel_id,),
+        )
+        return dict(row) if row else None
+
+    def add_recommended_channel(self, channel_id: int, data: Dict[str, Any]) -> bool:
+        allowed = {
+            "username",
+            "title",
+            "channel_type",
+            "first_seen",
+            "last_seen",
+            "discovered_from_channels",
+            "forward_count",
+            "coordinate_forward_count",
+            "recommendation_score",
+            "user_status",
+            "user_notes",
+            "added_to_scrape_list",
+            "last_scraped",
+            "is_accessible",
+            "requires_join",
+            "total_messages",
+            "estimated_coordinate_density",
+            "actual_coordinate_density",
+            "is_verified",
+            "is_scam",
+            "is_fake",
+            "avg_message_views",
+            "subscriber_count",
+        }
+
+        filtered = {k: v for k, v in (data or {}).items() if k in allowed and v is not None}
+        payload = {"channel_id": channel_id, **filtered}
+
+        columns = list(payload.keys())
+        placeholders = ", ".join(f":{col}" for col in columns)
+        update_columns = ", ".join(
+            f"{col}=excluded.{col}" for col in columns if col != "channel_id"
+        )
+
+        if update_columns:
+            sql = (
+                f"INSERT INTO recommended_channels ({', '.join(columns)}) "
+                f"VALUES ({placeholders}) "
+                f"ON CONFLICT(channel_id) DO UPDATE SET {update_columns}"
+            )
+        else:
+            sql = "INSERT OR IGNORE INTO recommended_channels (channel_id) VALUES (:channel_id)"
+
+        try:
+            with self.connect():
+                self.connect().execute(sql, payload)
+        except sqlite3.DatabaseError as error:
+            LOGGER.error("Failed to upsert recommended channel %s: %s", channel_id, error)
+            return False
+        return True
+
+    def update_recommended_channel(self, channel_id: int, data: Dict[str, Any]) -> bool:
+        if not data:
+            return False
+
+        allowed = {
+            "username",
+            "title",
+            "channel_type",
+            "first_seen",
+            "last_seen",
+            "discovered_from_channels",
+            "forward_count",
+            "coordinate_forward_count",
+            "recommendation_score",
+            "user_status",
+            "user_notes",
+            "added_to_scrape_list",
+            "last_scraped",
+            "is_accessible",
+            "requires_join",
+            "total_messages",
+            "estimated_coordinate_density",
+            "actual_coordinate_density",
+            "is_verified",
+            "is_scam",
+            "is_fake",
+            "avg_message_views",
+            "subscriber_count",
+        }
+
+        filtered = {k: v for k, v in data.items() if k in allowed}
+        if not filtered:
+            return False
+
+        assignments = ", ".join(f"{key}=?" for key in filtered)
+        values = list(filtered.values()) + [channel_id]
+
+        try:
+            with self.connect():
+                self.connect().execute(
+                    f"UPDATE recommended_channels SET {assignments} WHERE channel_id=?",
+                    values,
+                )
+        except sqlite3.DatabaseError as error:
+            LOGGER.error("Failed to update recommended channel %s: %s", channel_id, error)
+            return False
+        return True
+
+    def add_channel_forward(
+        self,
+        message_ref: int,
+        from_channel_id: int,
+        to_channel_id: int,
+        had_coordinates: bool,
+        forward_date: Optional[_dt.datetime] | Optional[str] = None,
+        forward_signature: Optional[str] = None,
+    ) -> bool:
+        if message_ref is None:
+            return False
+
+        if isinstance(forward_date, _dt.datetime):
+            forward_date_value = forward_date.isoformat()
+        else:
+            forward_date_value = forward_date
+
+        try:
+            with self.connect():
+                self.connect().execute(
+                    """
+                    INSERT OR IGNORE INTO channel_forwards (
+                        message_ref,
+                        from_channel_id,
+                        to_channel_id,
+                        forward_date,
+                        had_coordinates,
+                        forward_signature
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        message_ref,
+                        from_channel_id,
+                        to_channel_id,
+                        forward_date_value,
+                        int(bool(had_coordinates)),
+                        forward_signature,
+                    ),
+                )
+        except sqlite3.DatabaseError as error:
+            LOGGER.error(
+                "Failed to add channel forward record (from %s to %s): %s",
+                from_channel_id,
+                to_channel_id,
+                error,
+            )
+            return False
+        return True
+
+    def add_recommendation_event(
+        self,
+        channel_id: int,
+        event_type: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        payload = json.dumps(details or {})
+        try:
+            with self.connect():
+                self.connect().execute(
+                    "INSERT INTO recommendation_events (channel_id, event_type, event_details) VALUES (?, ?, ?)",
+                    (channel_id, event_type, payload),
+                )
+        except sqlite3.DatabaseError as error:
+            LOGGER.error(
+                "Failed to log recommendation event for channel %s: %s",
+                channel_id,
+                error,
+            )
+            return False
+        return True
+
+    def get_forward_statistics(self) -> Dict[str, Any]:
+        total_forwards = self.count("channel_forwards")
+        coord_forwards = self.count("channel_forwards", "had_coordinates=1")
+        row = self.query_one("SELECT COUNT(DISTINCT from_channel_id) AS cnt FROM channel_forwards")
+        distinct_sources = int(row["cnt"]) if row and row["cnt"] is not None else 0
+        return {
+            "total_forwards": total_forwards,
+            "coordinate_forwards": coord_forwards,
+            "distinct_forward_sources": distinct_sources,
+        }
+
+    def get_channels_by_forward_source(self, source_channel_id: int) -> List[Dict[str, Any]]:
+        rows = self.query(
+            """
+            SELECT rc.*
+            FROM recommended_channels rc
+            JOIN channel_forwards cf ON cf.from_channel_id = rc.channel_id
+            WHERE cf.to_channel_id=?
+            GROUP BY rc.channel_id
+            ORDER BY rc.recommendation_score DESC
+            """,
+            (source_channel_id,),
+        )
+        return [dict(row) for row in rows]
 
     # ------------------------------------------------------------------
     # Export and utilities
