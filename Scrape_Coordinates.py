@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from dotenv import load_dotenv, set_key
 from colorama import Fore, Style, init as colorama_init
@@ -753,7 +753,7 @@ def _run_recommended_scrape(
                 print(f"Enrichment failed: {exc}")
                 print("Continuing with available data...")
 
-    identifiers: List[str | PeerChannel] = []
+    identifiers: List[Union[str, PeerChannel]] = []
     for recommendation in recommendations:
         username = recommendation.get("username")
         if username:

@@ -9,7 +9,7 @@ import os
 import re
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING, Union
 
 import pandas as pd
 from telethon import TelegramClient
@@ -38,7 +38,7 @@ class ScrapeStats:
     coordinates_found: int = 0
 
 
-def _determine_channel_type(entity: Channel | Chat) -> str:
+def _determine_channel_type(entity: Union[Channel, Chat]) -> str:
     if isinstance(entity, Channel):
         if getattr(entity, "megagroup", False):
             return "supergroup"
@@ -53,8 +53,8 @@ async def scrape_channel(
     coordinate_pattern: Optional[re.Pattern] = None,
     database: Optional[CoordinatesDatabase] = None,
     skip_existing: bool = True,
-    recommendation_manager: "RecommendationManager" | None = None,
-    entity_cache: EntityCache | None = None,
+    recommendation_manager: Optional["RecommendationManager"] = None,
+    entity_cache: Optional[EntityCache] = None,
 ) -> Tuple[List[int], List[str], List[str], List[str], List[str], List[float], List[float], ScrapeStats]:
     """Scrape a single channel for coordinates with optional database integration."""
 
@@ -238,16 +238,16 @@ async def scrape_channel(
     )
 
 
-def _ensure_sequence(value: Sequence[str] | str) -> Sequence[str]:
+def _ensure_sequence(value: Union[Sequence[str], str]) -> Sequence[str]:
     if isinstance(value, (list, tuple, set)):
         return value
     return [value]
 
 
 def channel_scraper(
-    channel_links: Sequence[str] | str,
+    channel_links: Union[Sequence[str], str],
     date_limit: Optional[str],
-    output_path: str | None = None,
+    output_path: Optional[str] = None,
     api_id: Optional[int] = None,
     api_hash: Optional[str] = None,
     session_name: str = "simple_scraper",
@@ -257,7 +257,7 @@ def channel_scraper(
     skip_existing: bool = True,
     db_path: Optional[str] = None,
     database: Optional[CoordinatesDatabase] = None,
-    recommendation_manager: "RecommendationManager" | None = None,
+    recommendation_manager: Optional["RecommendationManager"] = None,
     auto_visualize: bool = False,
     visualization_type: str = "auto",
 ) -> pd.DataFrame:

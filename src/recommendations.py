@@ -54,7 +54,9 @@ class RecommendationSettings:
 class RecommendationManager:
     """Manages channel recommendations derived from forwarded messages."""
 
-    def __init__(self, database: CoordinatesDatabase, settings: RecommendationSettings | None = None) -> None:
+    def __init__(
+        self, database: CoordinatesDatabase, settings: Optional[RecommendationSettings] = None
+    ) -> None:
         self.db = database
         self.settings = settings or RecommendationSettings.from_environment()
 
