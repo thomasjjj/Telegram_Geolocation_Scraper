@@ -1,229 +1,345 @@
-"""
-Simple channel scraper for Telegram coordinates.
+"""Async scraping helpers with optional SQLite integration."""
 
-This module provides a simplified API for scraping coordinates from Telegram channels
-based on the contribution by tom-bullock.
-"""
+from __future__ import annotations
 
 import asyncio
 import datetime
 import logging
 import os
 import re
-from telethon import TelegramClient
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
 import pandas as pd
+from telethon import TelegramClient
+from telethon.tl.types import Channel, Chat, MessageMediaDocument, MessageMediaPhoto
 
 from src.coordinates import extract_coordinates
+from src.database import CoordinatesDatabase
 from src.export import save_dataframe_to_kml, save_dataframe_to_kmz
 
 
-async def scrape_channel(client, channel_id, date_limit, coordinate_pattern=None):
-    """
-    Scrape a single channel for coordinates.
+LOGGER = logging.getLogger(__name__)
 
-    Args:
-        client (TelegramClient): Initialized Telegram client
-        channel_id (str): Channel username or ID
-        date_limit (datetime): Only messages after this date will be processed
-        coordinate_pattern (re.Pattern, optional): Regex pattern for finding coordinates
 
-    Returns:
-        tuple: Lists of extracted data (message_ids, texts, media_types, dates, sources, latitudes, longitudes)
-    """
-    # Initialize data lists
-    message_ids = []
-    message_texts = []
-    media_types = []
-    dates = []
-    sources = []
-    latitudes = []
-    longitudes = []
+@dataclass
+class ScrapeStats:
+    """Aggregated information about a scraping run for a single channel."""
 
-    # If no coordinate pattern is provided, use the default one
+    channel_id: int
+    messages_processed: int = 0
+    messages_inserted: int = 0
+    messages_skipped: int = 0
+    coordinates_found: int = 0
+
+
+def _determine_channel_type(entity: Channel | Chat) -> str:
+    if isinstance(entity, Channel):
+        if getattr(entity, "megagroup", False):
+            return "supergroup"
+        return "channel"
+    return "group"
+
+
+async def scrape_channel(
+    client: TelegramClient,
+    channel_id,
+    date_limit: Optional[datetime.datetime],
+    coordinate_pattern: Optional[re.Pattern] = None,
+    database: Optional[CoordinatesDatabase] = None,
+    skip_existing: bool = True,
+) -> Tuple[List[int], List[str], List[str], List[str], List[str], List[float], List[float], ScrapeStats]:
+    """Scrape a single channel for coordinates with optional database integration."""
+
+    message_ids: List[int] = []
+    message_texts: List[str] = []
+    media_types: List[str] = []
+    dates: List[str] = []
+    sources: List[str] = []
+    latitudes: List[float] = []
+    longitudes: List[float] = []
+
     if coordinate_pattern is None:
-        coordinate_pattern = re.compile(r'(-?\d+\.\d+),\s*(-?\d+\.\d+)')
+        coordinate_pattern = re.compile(r"(-?\d+\.\d+),\s*(-?\d+\.\d+)")
+
+    stats = ScrapeStats(channel_id=0)
 
     try:
-        # Get channel entity
-        channel = await client.get_entity(channel_id)
+        entity = await client.get_entity(channel_id)
+        resolved_channel_id = getattr(entity, "id", channel_id)
+        stats.channel_id = resolved_channel_id
 
-        # Iterate through messages
-        async for message in client.iter_messages(channel, reverse=True, offset_date=date_limit):
-            # Check if message contains coordinates
-            if message.message:
-                message_text = str(message.message)
+        latest_message_id: Optional[int] = None
+        if database:
+            database.add_or_update_channel(
+                resolved_channel_id,
+                {
+                    "username": getattr(entity, "username", None),
+                    "title": getattr(entity, "title", getattr(entity, "name", None)),
+                    "channel_type": _determine_channel_type(entity),
+                },
+            )
+            if skip_existing:
+                latest_message_id = database.get_latest_message_id(resolved_channel_id)
+                if latest_message_id:
+                    LOGGER.info(
+                        "Resuming channel %s from message id %s", resolved_channel_id, latest_message_id
+                    )
 
-                # Two options for coordinate extraction:
+        iter_kwargs = {"reverse": True}
+        if date_limit:
+            iter_kwargs["offset_date"] = date_limit
+        if latest_message_id and skip_existing:
+            iter_kwargs["min_id"] = latest_message_id
 
-                # Option 1: Using the tom-bullock approach with regex findall
-                coordinates_matches = coordinate_pattern.findall(message_text)
+        async for message in client.iter_messages(entity, **iter_kwargs):
+            stats.messages_processed += 1
+            if not message or not message.message:
+                continue
 
-                # Option 2: Using the existing extract_coordinates function
-                # This will be used if Option 1 doesn't find any coordinates
-                if not coordinates_matches:
-                    coordinates = extract_coordinates(message_text)
-                    if coordinates:
-                        coordinates_matches = [coordinates]
+            existing_entry = False
+            if database and skip_existing and database.message_exists(resolved_channel_id, message.id):
+                stats.messages_skipped += 1
+                continue
+            elif database and skip_existing:
+                existing_entry = False
+            else:
+                existing_entry = database.message_exists(resolved_channel_id, message.id) if database else False
 
-                # Process any found coordinates
-                for coordinates in coordinates_matches:
-                    if isinstance(coordinates, tuple) and len(coordinates) == 2:
-                        latitude, longitude = coordinates
+            message_text = str(message.message)
+            has_coordinates = False
 
-                        # Add data to lists
-                        message_ids.append(message.id)
-                        message_texts.append(message_text)
+            matches = coordinate_pattern.findall(message_text)
+            if not matches:
+                extracted = extract_coordinates(message_text)
+                if extracted:
+                    matches = [extracted]
 
-                        # Determine media type
-                        if message.media:
-                            if isinstance(message.media, MessageMediaPhoto):
-                                media_types.append('photo')
-                            elif isinstance(message.media, MessageMediaDocument):
-                                media_types.append('video/mp4')
-                            else:
-                                media_types.append('other_media')
-                        else:
-                            media_types.append('text')
+            media_type = "text"
+            if message.media:
+                if isinstance(message.media, MessageMediaPhoto):
+                    media_type = "photo"
+                elif isinstance(message.media, MessageMediaDocument):
+                    media_type = "video/mp4"
+                else:
+                    media_type = "other_media"
 
-                        # Format date
-                        message_date = message.date
-                        formatted_date = message_date.strftime("%Y-%m-%d")
-                        dates.append(formatted_date)
+            message_date = message.date.strftime("%Y-%m-%d") if message.date else None
 
-                        # Format source URL
-                        if hasattr(channel, 'username') and channel.username:
-                            source = f't.me/{channel.username}/{message.id}'
-                        else:
-                            source = f't.me/c/{channel.id}/{message.id}'
-                        sources.append(source)
+            source: str
+            username = getattr(entity, "username", None)
+            if username:
+                source = f"t.me/{username}/{message.id}"
+            else:
+                source = f"t.me/c/{resolved_channel_id}/{message.id}"
 
-                        # Add coordinates
-                        latitudes.append(latitude)
-                        longitudes.append(longitude)
+            record = {
+                "message_text": message_text,
+                "message_date": message.date.isoformat() if message.date else None,
+                "media_type": media_type,
+                "has_coordinates": 0,
+            }
 
-    except Exception as e:
-        logging.error(f"Error scraping channel {channel_id}: {e}")
+            row_id = 0
+            if database:
+                row_id = database.add_message(resolved_channel_id, message.id, record)
+                if row_id and not existing_entry:
+                    stats.messages_inserted += 1
 
-    return message_ids, message_texts, media_types, dates, sources, latitudes, longitudes
+            if matches:
+                has_coordinates = True
+                record["has_coordinates"] = 1
+
+                message_ids.append(message.id)
+                message_texts.append(message_text)
+                media_types.append(media_type)
+                dates.append(message_date or "")
+                sources.append(source)
+
+                for latitude, longitude in matches:
+                    lat_value = float(latitude)
+                    lon_value = float(longitude)
+                    latitudes.append(lat_value)
+                    longitudes.append(lon_value)
+                    stats.coordinates_found += 1
+
+                    if database and row_id:
+                        database.add_coordinate(
+                            row_id,
+                            lat_value,
+                            lon_value,
+                            coordinate_format="decimal",
+                            extraction_confidence="high",
+                        )
+
+            if database and row_id:
+                # Update message flag if coordinates were found
+                if has_coordinates:
+                    database.add_message(
+                        resolved_channel_id,
+                        message.id,
+                        {"has_coordinates": 1, "last_updated": datetime.datetime.utcnow().isoformat()},
+                    )
+
+        if database:
+            database.update_channel_statistics(resolved_channel_id)
+
+    except Exception as error:  # pragma: no cover - Telethon errors hard to simulate in tests
+        LOGGER.error("Error scraping channel %s: %s", channel_id, error)
+
+    return (
+        message_ids,
+        message_texts,
+        media_types,
+        dates,
+        sources,
+        latitudes,
+        longitudes,
+        stats,
+    )
 
 
-def channel_scraper(channel_links, date_limit, output_path, api_id=None, api_hash=None,
-                    session_name="simple_scraper", kml_output_path=None, kmz_output_path=None):
-    """
-    Scrape Telegram channels for coordinates and save results to CSV.
+def _ensure_sequence(value: Sequence[str] | str) -> Sequence[str]:
+    if isinstance(value, (list, tuple, set)):
+        return value
+    return [value]
 
-    This is a simplified interface based on tom-bullock's contribution,
-    which allows for quick scraping of coordinates from channels.
 
-    Args:
-        channel_links (str or list): Channel username(s) or ID(s)
-        date_limit (str, optional): Cut-off date in YYYY-MM-DD format. Use None for no limit.
-        output_path (str): Path where to save the CSV file
-        api_id (int, optional): Telegram API ID (can be set via environment)
-        api_hash (str, optional): Telegram API hash (can be set via environment)
-        session_name (str, optional): Name for the Telegram session
-        kml_output_path (str, optional): Path to save a KML export.
-        kmz_output_path (str, optional): Path to save a KMZ export.
+def channel_scraper(
+    channel_links: Sequence[str] | str,
+    date_limit: Optional[str],
+    output_path: str,
+    api_id: Optional[int] = None,
+    api_hash: Optional[str] = None,
+    session_name: str = "simple_scraper",
+    kml_output_path: Optional[str] = None,
+    kmz_output_path: Optional[str] = None,
+    use_database: bool = True,
+    skip_existing: bool = True,
+    db_path: Optional[str] = None,
+    database: Optional[CoordinatesDatabase] = None,
+) -> pd.DataFrame:
+    """Scrape Telegram channels for coordinates and save the results."""
 
-    Returns:
-        pandas.DataFrame: DataFrame with extracted coordinates
-    """
-    # Convert date_limit to datetime object
+    parsed_date_limit: Optional[datetime.datetime] = None
     if date_limit:
         try:
-            date_limit = datetime.datetime.strptime(date_limit, "%Y-%m-%d")
+            parsed_date_limit = datetime.datetime.strptime(str(date_limit), "%Y-%m-%d")
         except ValueError:
-            logging.error("Invalid date format. Please use YYYY-MM-DD format.")
-            return None
+            LOGGER.error("Invalid date format. Please use YYYY-MM-DD format.")
+            return pd.DataFrame()
 
-    # Get API credentials
     if api_id is None:
-        api_id = os.environ.get('TELEGRAM_API_ID')
-        if not api_id:
+        api_id_env = os.environ.get("TELEGRAM_API_ID")
+        if not api_id_env:
             raise ValueError(
-                "Telegram API ID not provided. Set it via the api_id parameter or TELEGRAM_API_ID environment variable.")
-        api_id = int(api_id)
+                "Telegram API ID not provided. Set it via the api_id parameter or TELEGRAM_API_ID environment variable."
+            )
+        api_id = int(api_id_env)
 
     if api_hash is None:
-        api_hash = os.environ.get('TELEGRAM_API_HASH')
+        api_hash = os.environ.get("TELEGRAM_API_HASH")
         if not api_hash:
             raise ValueError(
-                "Telegram API hash not provided. Set it via the api_hash parameter or TELEGRAM_API_HASH environment variable.")
+                "Telegram API hash not provided. Set it via the api_hash parameter or TELEGRAM_API_HASH environment variable."
+            )
 
-    # Regular expression for coordinates
-    coordinate_pattern = re.compile(r'(-?\d+\.\d+),\s*(-?\d+\.\d+)')
+    coordinate_pattern = re.compile(r"(-?\d+\.\d+),\s*(-?\d+\.\d+)")
 
-    # Initialize data lists
-    message_ids = []
-    message_texts = []
-    media_types = []
-    dates = []
-    sources = []
-    latitudes = []
-    longitudes = []
+    channel_list = list(_ensure_sequence(channel_links))
 
-    # Ensure channel_links is a list
-    if not isinstance(channel_links, list):
-        channel_links = [channel_links]
+    message_ids: List[int] = []
+    message_texts: List[str] = []
+    media_types: List[str] = []
+    dates: List[str] = []
+    sources: List[str] = []
+    latitudes: List[float] = []
+    longitudes: List[float] = []
 
-    # Function to run in the event loop
-    async def main():
-        # Create client
-        client = TelegramClient(session_name, api_id, api_hash)
-        await client.start()
+    database_instance: Optional[CoordinatesDatabase] = None
+    if use_database:
+        database_instance = database or CoordinatesDatabase(db_path or "telegram_coordinates.db")
 
-        print(f"Connected to Telegram. Scraping {len(channel_links)} channels...")
+    async def runner() -> None:
+        async with TelegramClient(session_name, api_id, api_hash) as client:
+            LOGGER.info("Connected to Telegram. Scraping %s channels...", len(channel_list))
+            session_id: Optional[int] = None
+            if database_instance:
+                session_type = "single_channel" if len(channel_list) == 1 else "multi_channel"
+                session_id = database_instance.start_session(session_type)
+            total_skipped = total_new = total_coords = 0
+            try:
+                for idx, channel in enumerate(channel_list, start=1):
+                    LOGGER.info("[%s/%s] Scraping channel: %s", idx, len(channel_list), channel)
+                    result = await scrape_channel(
+                        client,
+                        channel,
+                        parsed_date_limit,
+                        coordinate_pattern,
+                        database=database_instance,
+                        skip_existing=skip_existing,
+                    )
 
-        # Process each channel
-        for channel_id in channel_links:
-            print(f"Scraping channel: {channel_id}")
-            result = await scrape_channel(client, channel_id, date_limit, coordinate_pattern)
+                    stats = result[-1]
+                    LOGGER.info(
+                        "Channel %s processed=%s inserted=%s skipped=%s coordinates=%s",
+                        stats.channel_id,
+                        stats.messages_processed,
+                        stats.messages_inserted,
+                        stats.messages_skipped,
+                        stats.coordinates_found,
+                    )
+                    total_skipped += stats.messages_skipped
+                    total_new += stats.messages_inserted
+                    total_coords += stats.coordinates_found
 
-            # Append results to main lists
-            message_ids.extend(result[0])
-            message_texts.extend(result[1])
-            media_types.extend(result[2])
-            dates.extend(result[3])
-            sources.extend(result[4])
-            latitudes.extend(result[5])
-            longitudes.extend(result[6])
+                    message_ids.extend(result[0])
+                    message_texts.extend(result[1])
+                    media_types.extend(result[2])
+                    dates.extend(result[3])
+                    sources.extend(result[4])
+                    latitudes.extend(result[5])
+                    longitudes.extend(result[6])
+            finally:
+                if database_instance and session_id:
+                    database_instance.end_session(
+                        session_id,
+                        {
+                            "channels_scraped": len(channel_list),
+                            "new_messages": total_new,
+                            "new_coordinates": total_coords,
+                            "skipped_messages": total_skipped,
+                            "status": "completed",
+                        },
+                    )
 
-            print(f"Found {len(result[0])} coordinates in channel {channel_id}")
+    asyncio.run(runner())
 
-        # Disconnect when done
-        await client.disconnect()
+    df = pd.DataFrame(
+        {
+            "message_id": message_ids,
+            "message_content": message_texts,
+            "message_media_type": media_types,
+            "message_published_at": dates,
+            "message_source": sources,
+            "latitude": latitudes,
+            "longitude": longitudes,
+        }
+    )
 
-    # Run the async function
-    with TelegramClient(session_name, api_id, api_hash) as client:
-        client.loop.run_until_complete(main())
-
-    # Create DataFrame from collected data
-    df = pd.DataFrame({
-        'message_id': message_ids,
-        'message_content': message_texts,
-        'message_media_type': media_types,
-        'message_published_at': dates,
-        'message_source': sources,
-        'latitude': latitudes,
-        'longitude': longitudes
-    })
-
-    # Save to CSV and optional geospatial formats
     if not df.empty:
-        # Ensure the directory exists
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         df.to_csv(output_path, index=False)
-        print(f"Successfully saved {len(df)} coordinates to {output_path}")
+        LOGGER.info("Successfully saved %s coordinates to %s", len(df), output_path)
 
         if kml_output_path:
             if save_dataframe_to_kml(df, kml_output_path):
-                print(f"Successfully saved KML to {kml_output_path}")
+                LOGGER.info("Successfully saved KML to %s", kml_output_path)
 
         if kmz_output_path:
             if save_dataframe_to_kmz(df, kmz_output_path):
-                print(f"Successfully saved KMZ to {kmz_output_path}")
+                LOGGER.info("Successfully saved KMZ to %s", kmz_output_path)
     else:
-        print("No coordinates found.")
+        LOGGER.info("No coordinates found.")
 
     return df
