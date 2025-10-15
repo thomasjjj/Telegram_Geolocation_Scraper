@@ -5,6 +5,7 @@ This module provides a simplified API for scraping coordinates from Telegram cha
 based on the contribution by tom-bullock.
 """
 
+import asyncio
 import datetime
 import logging
 import os
@@ -18,6 +19,37 @@ import pandas as pd
 
 from src.coordinates import extract_coordinates
 from src.export import save_dataframe_to_kml, save_dataframe_to_kmz
+
+
+DEFAULT_GEO_KEYWORDS = [
+    # English
+    "geolocation",
+    "geo-location",
+    "geolocated",
+    "geolocate",
+    "location",
+    "located",
+    "coordinates",
+    "coordinate",
+    # Russian
+    "геолокация",
+    "геолокации",
+    "геолокацию",
+    "геолокацией",
+    "местоположение",
+    "местоположении",
+    "местоположения",
+    "координаты",
+    "координатах",
+    "координатами",
+    # Ukrainian
+    "геолокація",
+    "геолокації",
+    "місцезнаходження",
+    "розташування",
+    "координати",
+    "координатах",
+]
 
 
 async def scrape_channel(client, channel_id, date_limit, coordinate_pattern=None):
@@ -241,6 +273,60 @@ def _derive_output_path(base_path, new_extension):
     return base + new_extension
 
 
+async def _search_dialogs_for_keywords(api_id, api_hash, session_name, keywords, message_limit=200, days_limit=None):
+    """Return a list of dialogs that mention any of the provided keywords."""
+
+    cutoff = None
+    if days_limit is not None:
+        cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days_limit)
+
+    results = []
+
+    async with TelegramClient(session_name, api_id, api_hash) as client:
+        async for dialog in client.iter_dialogs():
+            if dialog.is_user:
+                continue
+
+            entity = dialog.entity
+            match_keyword = None
+            excerpt = None
+            matched_message = None
+
+            async for message in client.iter_messages(entity, limit=message_limit):
+                if cutoff and message.date and message.date < cutoff:
+                    break
+
+                message_text = message.message or ""
+                if not message_text:
+                    continue
+
+                normalized = message_text.lower()
+                for keyword in keywords:
+                    if keyword.lower() in normalized:
+                        match_keyword = keyword
+                        matched_message = message
+                        start_idx = max(normalized.find(keyword.lower()) - 40, 0)
+                        end_idx = min(start_idx + 120, len(message_text))
+                        excerpt = message_text[start_idx:end_idx].replace("\n", " ")
+                        break
+
+                if match_keyword:
+                    break
+
+            if match_keyword:
+                results.append(
+                    {
+                        "dialog": dialog,
+                        "entity": entity,
+                        "keyword": match_keyword,
+                        "excerpt": excerpt,
+                        "message": matched_message,
+                    }
+                )
+
+    return results
+
+
 if __name__ == "__main__":
     # Load environment variables from .env if available
     env_path = Path(__file__).resolve().parent / ".env"
@@ -272,11 +358,84 @@ if __name__ == "__main__":
         print("Saved API hash to .env")
     os.environ["TELEGRAM_API_HASH"] = api_hash
 
-    channels_input = input("Enter Telegram channel usernames or IDs (comma separated): ").strip()
-    while not channels_input:
-        print("At least one channel is required.")
-        channels_input = input("Enter Telegram channel usernames or IDs (comma separated): ").strip()
-    channels = [channel.strip() for channel in channels_input.split(",") if channel.strip()]
+    session_name = input("Enter the session name (press Enter for default 'simple_scraper'): ").strip() or "simple_scraper"
+
+    prompt = (
+        "Enter Telegram channel usernames or IDs (comma separated) "
+        "or type 'SEARCH' to scan joined chats for geolocation keywords: "
+    )
+
+    channels = []
+
+    while not channels:
+        channels_input = input(prompt).strip()
+
+        if not channels_input:
+            print("At least one channel is required or type 'SEARCH' to run the keyword scan.")
+            continue
+
+        if channels_input.upper() == "SEARCH":
+            print("Searching your joined chats and channels for geolocation keywords...")
+            try:
+                search_results = asyncio.run(
+                    _search_dialogs_for_keywords(
+                        api_id=int(os.environ["TELEGRAM_API_ID"]),
+                        api_hash=os.environ["TELEGRAM_API_HASH"],
+                        session_name=session_name,
+                        keywords=DEFAULT_GEO_KEYWORDS,
+                    )
+                )
+            except Exception as search_error:
+                logging.error(f"Failed to search joined chats: {search_error}")
+                continue
+
+            if not search_results:
+                print("No matching chats or channels were found. You can try again or enter channel names manually.")
+                continue
+
+            print("Found the following chats/channels with geolocation-related keywords:")
+            for idx, result in enumerate(search_results, start=1):
+                entity = result["entity"]
+                username = getattr(entity, "username", None)
+                dialog_name = result["dialog"].name or username or str(entity.id)
+                identifier = f"@{username}" if username else f"ID {entity.id}"
+                keyword = result["keyword"]
+                excerpt = result["excerpt"] or "(no preview available)"
+                print(f"  [{idx}] {dialog_name} ({identifier}) - matched '{keyword}': {excerpt}")
+
+            selection = input(
+                "Enter the numbers of the chats you want to scrape (comma separated, press Enter to select all): "
+            ).strip()
+
+            if not selection:
+                channels = [result["entity"] for result in search_results]
+                break
+
+            chosen_indices = []
+            for raw_item in selection.split(","):
+                raw_item = raw_item.strip()
+                if not raw_item:
+                    continue
+                if not raw_item.isdigit():
+                    print(f"Ignoring invalid selection '{raw_item}'. Please enter numeric choices.")
+                    chosen_indices = []
+                    break
+                chosen_indices.append(int(raw_item))
+
+            if not chosen_indices:
+                continue
+
+            invalid_choices = [idx for idx in chosen_indices if idx < 1 or idx > len(search_results)]
+            if invalid_choices:
+                print(f"Invalid selection numbers: {', '.join(map(str, invalid_choices))}. Please try again.")
+                continue
+
+            channels = [search_results[idx - 1]["entity"] for idx in chosen_indices]
+        else:
+            channels = [channel.strip() for channel in channels_input.split(",") if channel.strip()]
+
+        if not channels:
+            print("No valid channels selected. Please try again.")
 
     date_limit = input("Enter the date limit (YYYY-MM-DD): ").strip()
     while True:
@@ -291,8 +450,6 @@ if __name__ == "__main__":
     while not output_path:
         print("Output path cannot be empty.")
         output_path = input("Enter the output CSV path: ").strip()
-
-    session_name = input("Enter the session name (press Enter for default 'simple_scraper'): ").strip() or "simple_scraper"
 
     export_kml = input("Export to KML as well? (y/N): ").strip().lower() == "y"
     kml_output_path = None
