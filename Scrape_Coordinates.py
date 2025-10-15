@@ -106,9 +106,10 @@ ADVANCED_MENU = """
 3. Scan all known channels with coordinates
 4. Manage database
 5. Manage recommended channels
-6. Back to main menu
+6. Visualise coordinates (Kepler.gl)
+7. Back to main menu
 
-Enter choice (1-6): """
+Enter choice (1-7): """
 
 
 def configure_logging() -> None:
@@ -1325,6 +1326,151 @@ Enter choice: """
             print("Invalid choice. Please try again.")
 
 
+def handle_kepler_visualization(database: Optional[CoordinatesDatabase]) -> None:
+    import importlib.util
+
+    if importlib.util.find_spec("keplergl") is None:
+        print("\nKepler.gl visualisations require the optional 'keplergl' package.")
+        print("Install it with: pip install keplergl")
+        return
+
+    from src.kepler_visualizer import (
+        CoordinateVisualizer,
+        create_map,
+        create_temporal_animation,
+        visualize_forward_network,
+    )
+
+    menu = """
+=== Kepler.gl Visualisation ===
+
+1. Visualise coordinates from CSV
+2. Visualise all database records
+3. Visualise a specific channel from the database
+4. Create heatmap from CSV
+5. Create cluster map from CSV
+6. Create 3D hexagon map from CSV
+7. Visualise forward network (database)
+8. Create temporal animation from CSV
+9. Back
+
+Enter choice (1-9): """
+
+    while True:
+        choice = input(menu).strip()
+
+        if choice == "1":
+            csv_path = Path(input("CSV path: ").strip())
+            if not csv_path.exists():
+                print(f"File not found: {csv_path}")
+                continue
+            output = input("Output HTML path [results/map.html]: ").strip() or "results/map.html"
+            try:
+                create_map(csv_path, output)
+                print(f"Interactive map saved to {output}")
+            except Exception as exc:
+                print(f"Failed to create map: {exc}")
+
+        elif choice == "2":
+            if not database:
+                print("Database support is disabled.")
+                continue
+            output = input("Output HTML path [results/database_map.html]: ").strip() or "results/database_map.html"
+            try:
+                visualizer = CoordinateVisualizer()
+                visualizer.from_database(database.db_path, output_html=output)
+                print(f"Interactive map saved to {output}")
+            except Exception as exc:
+                print(f"Failed to create map: {exc}")
+
+        elif choice == "3":
+            if not database:
+                print("Database support is disabled.")
+                continue
+            channel_value = input("Channel ID: ").strip()
+            if not channel_value.isdigit():
+                print("Channel ID must be numeric.")
+                continue
+            output = (
+                input(f"Output HTML path [results/channel_{channel_value}.html]: ").strip()
+                or f"results/channel_{channel_value}.html"
+            )
+            try:
+                visualizer = CoordinateVisualizer()
+                visualizer.from_database(database.db_path, channel_id=int(channel_value), output_html=output)
+                print(f"Interactive map saved to {output}")
+            except Exception as exc:
+                print(f"Failed to create map: {exc}")
+
+        elif choice == "4":
+            csv_path = Path(input("CSV path: ").strip())
+            if not csv_path.exists():
+                print(f"File not found: {csv_path}")
+                continue
+            output = input("Output HTML path [results/heatmap.html]: ").strip() or "results/heatmap.html"
+            try:
+                create_map(csv_path, output, visualization_type="heatmap")
+                print(f"Heatmap saved to {output}")
+            except Exception as exc:
+                print(f"Failed to create heatmap: {exc}")
+
+        elif choice == "5":
+            csv_path = Path(input("CSV path: ").strip())
+            if not csv_path.exists():
+                print(f"File not found: {csv_path}")
+                continue
+            output = input("Output HTML path [results/clusters.html]: ").strip() or "results/clusters.html"
+            try:
+                create_map(csv_path, output, visualization_type="clusters")
+                print(f"Cluster map saved to {output}")
+            except Exception as exc:
+                print(f"Failed to create cluster map: {exc}")
+
+        elif choice == "6":
+            csv_path = Path(input("CSV path: ").strip())
+            if not csv_path.exists():
+                print(f"File not found: {csv_path}")
+                continue
+            output = input("Output HTML path [results/hexagons.html]: ").strip() or "results/hexagons.html"
+            try:
+                create_map(csv_path, output, visualization_type="hexagons")
+                print(f"3D hexagon map saved to {output}")
+            except Exception as exc:
+                print(f"Failed to create 3D hexagon map: {exc}")
+
+        elif choice == "7":
+            if not database:
+                print("Database support is disabled.")
+                continue
+            output = input("Output HTML path [results/forward_network.html]: ").strip() or "results/forward_network.html"
+            try:
+                map_instance = visualize_forward_network(database, output)
+                if map_instance is None:
+                    print("No forwarding relationships with coordinates found.")
+                else:
+                    print(f"Forward network saved to {output}")
+            except Exception as exc:
+                print(f"Failed to create forward network map: {exc}")
+
+        elif choice == "8":
+            csv_path = Path(input("CSV path: ").strip())
+            if not csv_path.exists():
+                print(f"File not found: {csv_path}")
+                continue
+            time_column = input("Timestamp column [message_date]: ").strip() or "message_date"
+            output = input("Output HTML path [results/temporal.html]: ").strip() or "results/temporal.html"
+            try:
+                create_temporal_animation(csv_path, output, time_column=time_column)
+                print(f"Temporal animation saved to {output}")
+            except Exception as exc:
+                print(f"Failed to create temporal animation: {exc}")
+
+        elif choice == "9":
+            break
+        else:
+            print("Invalid choice. Please select an option from 1 to 9.")
+
+
 def handle_advanced_options(
     database: Optional[CoordinatesDatabase],
     db_config: DbConfig,
@@ -1337,8 +1483,8 @@ def handle_advanced_options(
     while True:
         choice = prompt_validated(
             ADVANCED_MENU,
-            lambda value: value in {str(i) for i in range(1, 7)},
-            error_msg="Please choose an option from 1 to 6.",
+            lambda value: value in {str(i) for i in range(1, 8)},
+            error_msg="Please choose an option from 1 to 7.",
         )
         if choice == "1":
             handle_search_all_chats(
@@ -1365,9 +1511,11 @@ def handle_advanced_options(
                 api_hash,
             )
         elif choice == "6":
+            handle_kepler_visualization(database)
+        elif choice == "7":
             break
         else:
-            print("Invalid selection. Please choose an option from 1 to 6.")
+            print("Invalid selection. Please choose an option from 1 to 7.")
 
 
 def main() -> None:
