@@ -532,6 +532,15 @@ def prompt_channel_selection(
 
         print("No valid channels selected. Please try again.")
 
+    session_name = os.environ.get("TELEGRAM_SESSION_NAME")
+    if not session_name:
+        session_name = input("Enter the session name (press Enter for default 'simple_scraper'): ").strip() or "simple_scraper"
+        set_key(str(env_path), "TELEGRAM_SESSION_NAME", session_name)
+        print("Saved session name to .env")
+    else:
+        print(f"Using session name '{session_name}' from .env")
+
+    os.environ["TELEGRAM_SESSION_NAME"] = session_name
 
 def prompt_date_limit() -> Optional[str]:
     value = prompt_validated(
