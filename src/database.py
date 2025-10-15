@@ -349,6 +349,13 @@ class CoordinatesDatabase:
                     extraction_confidence,
                 ),
             )
+        LOGGER.info(
+            "Saved coordinate (%s, %s) for message_ref %s with row id %s",
+            latitude,
+            longitude,
+            message_ref,
+            cursor.lastrowid,
+        )
         return int(cursor.lastrowid)
 
     def get_coordinates_by_channel(self, channel_id: int) -> List[sqlite3.Row]:
