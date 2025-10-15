@@ -122,6 +122,44 @@ def test_harvest_telegram_recommendations_integration(
     mock_database.add_recommendation_event.assert_called_once()
 
 
+def test_harvest_auto_enriches_new_recommendations(
+    recommendation_manager: RecommendationManager,
+    mock_database: MagicMock,
+):
+    recommendation_manager.settings.auto_enrich = True
+    recommendation_manager.fetch_telegram_recommendations = AsyncMock(
+        return_value=[
+            {
+                "channel_id": 333,
+                "title": "Auto Enrich Channel",
+                "username": "auto_enrich_channel",
+                "participants_count": 500,
+                "verified": False,
+                "scam": False,
+                "fake": False,
+                "restricted": False,
+            }
+        ]
+    )
+    recommendation_manager.enrich_recommendation = AsyncMock(return_value=True)
+
+    mock_database.get_channels_with_coordinates.return_value = [
+        {"id": 222, "title": "Signal Source", "coordinate_density": 25.0}
+    ]
+    mock_database.get_recommended_channel.return_value = None
+
+    client = AsyncMock()
+
+    asyncio.run(
+        recommendation_manager.harvest_telegram_recommendations(
+            client,
+            min_coordinate_density=10.0,
+        )
+    )
+
+    recommendation_manager.enrich_recommendation.assert_awaited_once_with(client, 333)
+
+
 def test_scoring_with_telegram_recommendations(mock_database: MagicMock):
     manager = RecommendationManager(mock_database, RecommendationSettings())
 

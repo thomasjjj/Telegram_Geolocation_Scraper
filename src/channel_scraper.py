@@ -176,6 +176,7 @@ async def _process_message_batch(
     channel_id: int,
     channel_display_name: str,
     entity: Any,
+    client: TelegramClient | None,
     coordinate_pattern: re.Pattern,
     database: Optional[CoordinatesDatabase],
     skip_existing: bool,
@@ -312,6 +313,8 @@ async def _process_message_batch(
                 channel_display_name,
             )
 
+    new_recommendations: set[int] = set()
+
     if recommendation_manager:
         for message in messages_to_process:
             if not getattr(message, "forward", None):
@@ -321,18 +324,42 @@ async def _process_message_batch(
             has_coordinates = message.id in messages_with_coords
 
             try:
-                recommendation_manager.process_forwarded_message(
+                new_channel_id = recommendation_manager.process_forwarded_message(
                     message=message,
                     current_channel_id=channel_id,
                     has_coordinates=has_coordinates,
                     message_row_id=row_id,
                 )
+                if new_channel_id is not None:
+                    new_recommendations.add(int(new_channel_id))
             except (sqlite3.DatabaseError, TypeError, ValueError) as exc:
                 LOGGER.debug(
                     "Recommendation processing failed for message %s: %s",
                     message.id,
                     exc,
                 )
+
+    if (
+        recommendation_manager
+        and new_recommendations
+        and getattr(recommendation_manager.settings, "auto_enrich", False)
+    ):
+        if client is None:
+            LOGGER.debug(
+                "Auto-enrichment requested for new recommendations but no Telegram client was provided."
+            )
+        else:
+            for rec_channel_id in new_recommendations:
+                try:
+                    await recommendation_manager.enrich_recommendation(
+                        client, rec_channel_id
+                    )
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    LOGGER.debug(
+                        "Auto-enrichment failed for channel %s: %s",
+                        rec_channel_id,
+                        exc,
+                    )
 
     return batch_stats
 
@@ -413,6 +440,7 @@ async def scrape_channel(
                     resolved_channel_id,
                     channel_display_name,
                     entity,
+                    client,
                     coordinate_pattern,
                     database,
                     skip_existing,
@@ -438,6 +466,7 @@ async def scrape_channel(
                 resolved_channel_id,
                 channel_display_name,
                 entity,
+                client,
                 coordinate_pattern,
                 database,
                 skip_existing,

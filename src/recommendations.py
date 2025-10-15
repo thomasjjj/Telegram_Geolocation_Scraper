@@ -114,19 +114,23 @@ class RecommendationManager:
         current_channel_id: int,
         has_coordinates: bool,
         message_row_id: Optional[int] = None,
-    ) -> bool:
-        """Process a forwarded message and update recommendation records."""
+    ) -> Optional[int]:
+        """Process a forwarded message and update recommendation records.
+
+        Returns the channel ID of a newly discovered recommendation, or ``None``
+        when no new recommendation was created.
+        """
 
         if not self.settings.enabled or not message or not getattr(message, "forward", None):
-            return False
+            return None
 
         forward_info = self._extract_forward_info(message)
         if not forward_info:
-            return False
+            return None
 
         source_channel_id = forward_info["channel_id"]
         if self._is_already_followed(source_channel_id):
-            return False
+            return None
 
         existing = self.db.get_recommended_channel(source_channel_id)
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -187,7 +191,7 @@ class RecommendationManager:
             )
 
         self._recalculate_score(source_channel_id)
-        return created
+        return source_channel_id if created else None
 
     # ------------------------------------------------------------------
     # Telegram API recommendation harvesting
@@ -362,6 +366,15 @@ class RecommendationManager:
                             density,
                         )
                         stats["new_recommendations"] += 1
+                        if self.settings.auto_enrich:
+                            try:
+                                await self.enrich_recommendation(client, rec_channel_id)
+                            except Exception as exc:  # pragma: no cover - defensive logging
+                                LOGGER.debug(
+                                    "Auto-enrichment failed for Telegram recommendation %s: %s",
+                                    rec_channel_id,
+                                    exc,
+                                )
 
                         rec_name = (
                             rec.get("title")
