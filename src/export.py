@@ -257,6 +257,7 @@ class CoordinatesWriter:
         try:
             self.file = open(self.csv_file_path, 'a', newline='', encoding='utf-8')
             csv_writer = csv.writer(self.file)
+            self.writer = _CSVProxyWriter(csv_writer, self)
 
             if not self.file_exists:
                 header = [
@@ -269,14 +270,11 @@ class CoordinatesWriter:
                     'Latitude',
                     'Longitude'
                 ]
-                csv_writer.writerow(header)
+                self.writer.writerow(header, header=True)
                 logging.info(f"Created new CSV file: {self.csv_file_path}")
-                if self.rows is not None:
-                    self.headers = header
             else:
                 logging.info(f"Appending to existing CSV file: {self.csv_file_path}")
 
-            self.writer = _CSVProxyWriter(csv_writer, self)
             return self.writer
 
         except (OSError, csv.Error) as e:
@@ -322,17 +320,35 @@ class _CSVProxyWriter:
         self._csv_writer = csv_writer
         self._parent = parent
 
-    def writerow(self, row):
+    def writerow(self, row, *, header: bool = False):
+        """Write a single row and optionally record it as the header.
+
+        Args:
+            row: Iterable of values to write to the CSV file.
+            header: Set to True when the row represents column headers so that
+                auxiliary exports (e.g., KML/KMZ) can correctly map values.
+        """
+
         self._csv_writer.writerow(row)
         if self._parent.rows is not None:
-            if self._parent.headers is None:
+            if header:
+                self._parent.headers = list(row)
+            elif self._parent.headers is None:
+                logging.debug(
+                    "Assuming the first row written via CoordinatesWriter is a header. "
+                    "Pass header=True to writerow() to make this explicit."
+                )
                 self._parent.headers = list(row)
             else:
                 self._parent.rows.append(list(row))
 
-    def writerows(self, rows):
+    def writerows(self, rows, *, header: bool = False):
+        """Write multiple rows, optionally treating the first as the header."""
+
+        first = True
         for row in rows:
-            self.writerow(row)
+            self.writerow(row, header=header and first)
+            first = False
 
     def __getattr__(self, item):
         return getattr(self._csv_writer, item)
