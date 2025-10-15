@@ -314,7 +314,9 @@ async def _search_dialogs_for_keywords(
 ) -> List[SearchResult]:
     cutoff = None
     if days_limit is not None:
-        cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days_limit)
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
+            days=days_limit
+        )
 
     keyword_list = list(keywords)
 
@@ -328,7 +330,7 @@ async def _search_dialogs_for_keywords(
     results: List[SearchResult] = []
     dialogs_checked = 0
     messages_scanned = 0
-    start_time = datetime.datetime.utcnow()
+    start_time = datetime.datetime.now(datetime.UTC)
 
     # Initial feedback for the user to set expectations.
     print("\n" + "=" * 60)
@@ -359,7 +361,9 @@ async def _search_dialogs_for_keywords(
                 messages_in_chat = 0
 
                 if dialogs_checked % 10 == 0:
-                    elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
+                    elapsed = (
+                        datetime.datetime.now(datetime.UTC) - start_time
+                    ).total_seconds()
                     rate = dialogs_checked / elapsed if elapsed > 0 else 0
                     print(
                         f"\r📊 Searched: {dialogs_checked} chats | "
@@ -427,7 +431,7 @@ async def _search_dialogs_for_keywords(
     # Ensure any inline progress line is terminated cleanly.
     print()
 
-    elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
+    elapsed = (datetime.datetime.now(datetime.UTC) - start_time).total_seconds()
     print("-" * 60)
     print("\n✅ SEARCH COMPLETE")
     print(f"   • Total chats checked: {dialogs_checked}")

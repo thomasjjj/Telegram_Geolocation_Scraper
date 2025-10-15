@@ -881,7 +881,9 @@ class CoordinatesDatabase:
     def end_session(self, session_id: int, stats: Dict[str, Any]) -> bool:
         stats = stats or {}
         fields = {
-            "session_end": stats.get("session_end", _dt.datetime.utcnow().isoformat()),
+            "session_end": stats.get(
+                "session_end", _dt.datetime.now(_dt.UTC).isoformat()
+            ),
             "channels_scraped": stats.get("channels_scraped"),
             "new_messages": stats.get("new_messages"),
             "new_coordinates": stats.get("new_coordinates"),
