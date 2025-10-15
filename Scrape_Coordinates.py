@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import getpass
 import csv
 import datetime
 import json
@@ -110,6 +111,45 @@ def get_database_configuration() -> dict:
         "path": os.environ.get("DATABASE_PATH", "telegram_coordinates.db"),
         "skip_existing": os.environ.get("DATABASE_SKIP_EXISTING", "true").lower() == "true",
     }
+
+
+def get_default_session_name() -> str:
+    return os.environ.get("TELEGRAM_SESSION_NAME", "simple_scraper")
+
+
+def prompt_session_name() -> str:
+    default_session = get_default_session_name()
+    session_name = (
+        input(f"Enter Telegram session name to use [{default_session}]: ").strip() or default_session
+    )
+    os.environ["TELEGRAM_SESSION_NAME"] = session_name
+    return session_name
+
+
+async def ensure_telegram_authentication(api_id: int, api_hash: str, session_name: str) -> None:
+    """Ensure the Telegram session is authenticated before continuing."""
+
+    print(f"\nConnecting to Telegram using session '{session_name}' to verify authentication...")
+
+    phone_prompt = lambda: input("Enter your Telegram phone number (including country code): ").strip()
+    password_prompt = lambda: getpass.getpass("Enter your Telegram 2FA password: ")
+
+    client = TelegramClient(session_name, api_id, api_hash)
+    try:
+        await client.start(phone=phone_prompt, password=password_prompt)
+        me = await client.get_me()
+    except Exception as exc:  # pragma: no cover - Telethon runtime interaction
+        raise SystemExit(f"Failed to authenticate with Telegram: {exc}") from exc
+    else:
+        if me:
+            display_name_parts = [getattr(me, "first_name", None), getattr(me, "last_name", None)]
+            display_name = " ".join(part for part in display_name_parts if part)
+            identifier = getattr(me, "username", None) or display_name or str(getattr(me, "id", "unknown"))
+            print(f"Authenticated as {identifier}.")
+        else:
+            print("Authentication successful.")
+    finally:
+        await client.disconnect()
 
 
 async def _search_dialogs_for_keywords(
@@ -312,7 +352,11 @@ def handle_specific_channel(
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
 ) -> None:
-    session_name = input("Enter the session name (press Enter for default 'simple_scraper'): ").strip() or "simple_scraper"
+    default_session = get_default_session_name()
+    session_name = (
+        input(f"Enter the session name (press Enter for default '{default_session}'): ").strip()
+        or default_session
+    )
     channels = prompt_channel_selection()
     date_limit = prompt_date_limit()
 
@@ -338,7 +382,11 @@ def handle_search_all_chats(
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
 ) -> None:
-    session_name = input("Enter the session name (press Enter for default 'simple_scraper'): ").strip() or "simple_scraper"
+    default_session = get_default_session_name()
+    session_name = (
+        input(f"Enter the session name (press Enter for default '{default_session}'): ").strip()
+        or default_session
+    )
     results = asyncio.run(
         _search_dialogs_for_keywords(api_id=api_id, api_hash=api_hash, session_name=session_name, keywords=DEFAULT_GEO_KEYWORDS)
     )
@@ -953,6 +1001,9 @@ def main() -> None:
     env_path = Path(__file__).resolve().parent / ".env"
     load_environment(env_path)
     api_id, api_hash = ensure_api_credentials(env_path)
+
+    session_name = prompt_session_name()
+    asyncio.run(ensure_telegram_authentication(api_id, api_hash, session_name))
 
     db_config = get_database_configuration()
     database = CoordinatesDatabase(db_config["path"]) if db_config["enabled"] else None
