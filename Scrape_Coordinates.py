@@ -383,20 +383,23 @@ async def _search_dialogs_for_keywords(
 
                 LOGGER.debug("Checking chat: %s (ID: %s)", chat_name, getattr(entity, "id", "unknown"))
 
-                async for message in client.iter_messages(entity, limit=message_limit):
-                    messages_scanned += 1
-                    messages_in_chat += 1
+                for keyword in keyword_list:
+                    async for message in client.iter_messages(
+                        entity,
+                        search=keyword,
+                        limit=message_limit,
+                        min_date=cutoff,
+                    ):
+                        messages_scanned += 1
+                        messages_in_chat += 1
 
-                    if cutoff and message.date and message.date < cutoff:
-                        break
+                        message_text = message.message or ""
+                        if not message_text:
+                            continue
 
-                    message_text = message.message or ""
-                    if not message_text:
-                        continue
-
-                    normalized = message_text.lower()
-                    for keyword in keyword_list:
+                        normalized = message_text.lower()
                         lowered_keyword = keyword.lower()
+
                         if lowered_keyword in normalized:
                             match_keyword = keyword
                             start_idx = max(normalized.find(lowered_keyword) - 40, 0)
