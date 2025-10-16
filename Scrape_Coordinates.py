@@ -388,7 +388,7 @@ async def _search_dialogs_for_keywords(
                         entity,
                         search=keyword,
                         limit=message_limit,
-                        min_date=cutoff,
+                        offset_date=cutoff,
                     ):
                         messages_scanned += 1
                         messages_in_chat += 1
