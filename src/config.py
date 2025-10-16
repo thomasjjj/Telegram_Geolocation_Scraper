@@ -105,6 +105,36 @@ class Config:
             return 4
 
     @property
+    def entity_cache_max_age_hours(self) -> int:
+        """Maximum age (in hours) before cached entities are refreshed."""
+
+        value = os.getenv("ENTITY_CACHE_MAX_AGE_HOURS", "168")
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 168
+
+    @property
+    def rate_limit_base_delay(self) -> float:
+        """Base delay (in seconds) for adaptive rate limiting."""
+
+        value = os.getenv("RATE_LIMIT_BASE_DELAY", "6")
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return 6.0
+
+    @property
+    def rate_limit_max_delay(self) -> float:
+        """Maximum delay (in seconds) that the adaptive limiter may reach."""
+
+        value = os.getenv("RATE_LIMIT_MAX_DELAY", "300")
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return 300.0
+
+    @property
     def database_wal_mode(self) -> bool:
         """Whether SQLite Write-Ahead Logging should be enabled."""
 

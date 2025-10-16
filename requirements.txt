@@ -5,3 +5,4 @@ dotenv~=0.9.9
 colorama>=0.4.4
 keplergl>=0.3.2
 jupyter>=1.0.0
+tqdm>=4.64.0

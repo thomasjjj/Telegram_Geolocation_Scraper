@@ -20,7 +20,7 @@ import sqlite3
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 from telethon.extensions import BinaryReader
 
@@ -44,12 +44,40 @@ class DatabaseStatistics:
     last_scrape: Optional[str]
 
 
+ENTITY_CACHE_VERSION = "1"
+
+
+@dataclass
+class EntityCacheRecord:
+    """Container describing a cached Telegram entity."""
+
+    identifier: str
+    entity: Any
+    entity_type: Optional[str]
+    channel_id: Optional[int]
+    access_hash: Optional[int]
+    username: Optional[str]
+    title: Optional[str]
+    stored_at: Optional[_dt.datetime]
+    last_used: Optional[_dt.datetime]
+    entity_version: Optional[str]
+    entity_json: Optional[str]
+
+    def is_expired(self, max_age_hours: int) -> bool:
+        if max_age_hours <= 0 or not self.stored_at:
+            return False
+
+        expiry = self.stored_at + _dt.timedelta(hours=max_age_hours)
+        return _dt.datetime.now(_dt.UTC) >= expiry
+
+
 class CoordinatesDatabase:
     """SQLite database manager for Telegram coordinates scraper."""
 
     def __init__(self, db_path: str = "telegram_coordinates.db") -> None:
         self.db_path = Path(db_path)
         self._connection: Optional[sqlite3.Connection] = None
+        self.entity_cache_max_age_hours = Config().entity_cache_max_age_hours
         self.connect()
         self.initialize_schema()
         self._ensure_search_history_table()
@@ -237,9 +265,26 @@ class CoordinatesDatabase:
                 username TEXT,
                 title TEXT,
                 stored_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                last_used DATETIME DEFAULT CURRENT_TIMESTAMP
+                last_used DATETIME DEFAULT CURRENT_TIMESTAMP,
+                entity_version TEXT DEFAULT '1',
+                entity_json TEXT
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS message_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_ref INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                domain TEXT,
+                category TEXT,
+                resolved_url TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(message_ref) REFERENCES messages(id) ON DELETE CASCADE,
+                UNIQUE(message_ref, url)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_message_links_domain ON message_links(domain)",
+            "CREATE INDEX IF NOT EXISTS idx_message_links_category ON message_links(category)",
         ]
 
         connection = self.connect()
@@ -250,6 +295,7 @@ class CoordinatesDatabase:
 
                 self._ensure_recommended_channels_schema(connection)
                 self._ensure_search_history_table(connection)
+                self._ensure_entity_cache_schema(connection)
 
             config = Config()
             if config.database_wal_mode:
@@ -336,6 +382,27 @@ class CoordinatesDatabase:
                 ON chat_search_history(last_searched_date)
                 """
             )
+
+    def _ensure_entity_cache_schema(self, connection: sqlite3.Connection) -> None:
+        """Ensure new columns for the entity cache table exist."""
+
+        columns = connection.execute("PRAGMA table_info(entity_cache)").fetchall()
+        column_names = {row[1] for row in columns}
+
+        migrations = {
+            "entity_version": "ALTER TABLE entity_cache ADD COLUMN entity_version TEXT DEFAULT '1'",
+            "entity_json": "ALTER TABLE entity_cache ADD COLUMN entity_json TEXT",
+        }
+
+        for column_name, statement in migrations.items():
+            if column_name in column_names:
+                continue
+            try:
+                connection.execute(statement)
+                LOGGER.info("Added missing column %s to entity_cache table", column_name)
+            except sqlite3.DatabaseError as exc:  # pragma: no cover - defensive
+                LOGGER.error("Failed to migrate entity_cache schema (%s): %s", column_name, exc)
+                raise
 
     def was_chat_recently_searched(self, chat_id: int, days: int = 7) -> bool:
         """Return ``True`` if *chat_id* was searched within the last *days* days."""
@@ -665,6 +732,45 @@ class CoordinatesDatabase:
         )
         return id_map
 
+    def add_message_links(
+        self, message_links: Dict[int, List[Dict[str, Optional[str]]]]
+    ) -> None:
+        """Insert extracted message links into the ``message_links`` table."""
+
+        if not message_links:
+            return
+
+        rows: List[Tuple[Any, ...]] = []
+        for message_ref, links in message_links.items():
+            if not links:
+                continue
+            for link in links:
+                rows.append(
+                    (
+                        int(message_ref),
+                        link.get("url"),
+                        link.get("domain"),
+                        link.get("category"),
+                        link.get("resolved_url"),
+                    )
+                )
+
+        if not rows:
+            return
+
+        sql = """
+            INSERT INTO message_links (message_ref, url, domain, category, resolved_url)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(message_ref, url) DO UPDATE SET
+                domain=excluded.domain,
+                category=excluded.category,
+                resolved_url=COALESCE(excluded.resolved_url, message_links.resolved_url),
+                created_at=CURRENT_TIMESTAMP
+        """
+
+        with self.connect():
+            self.connect().executemany(sql, rows)
+
     def bulk_update_message_coordinates(
         self, channel_id: int, message_ids: Sequence[int]
     ) -> None:
@@ -886,12 +992,22 @@ class CoordinatesDatabase:
             LOGGER.debug("Failed to serialise entity %s: %s", identifier, error)
             return False
 
+        entity_dict = None
+        try:
+            to_dict = getattr(entity, "to_dict", None)
+            if callable(to_dict):
+                entity_dict = json.dumps({"version": ENTITY_CACHE_VERSION, "payload": to_dict()})
+        except (TypeError, ValueError) as error:  # pragma: no cover - defensive
+            LOGGER.debug("Failed to convert entity %s to JSON: %s", identifier, error)
+
         metadata = {
             "entity_type": type(entity).__name__,
             "channel_id": getattr(entity, "id", None),
             "access_hash": getattr(entity, "access_hash", None),
             "username": getattr(entity, "username", None),
             "title": getattr(entity, "title", getattr(entity, "name", None)),
+            "entity_version": ENTITY_CACHE_VERSION,
+            "entity_json": entity_dict,
         }
 
         connection = self.connect()
@@ -899,8 +1015,28 @@ class CoordinatesDatabase:
             with connection:
                 connection.execute(
                     """
-                    INSERT INTO entity_cache (identifier, entity_bytes, entity_type, channel_id, access_hash, username, title)
-                    VALUES (:identifier, :entity_bytes, :entity_type, :channel_id, :access_hash, :username, :title)
+                    INSERT INTO entity_cache (
+                        identifier,
+                        entity_bytes,
+                        entity_type,
+                        channel_id,
+                        access_hash,
+                        username,
+                        title,
+                        entity_version,
+                        entity_json
+                    )
+                    VALUES (
+                        :identifier,
+                        :entity_bytes,
+                        :entity_type,
+                        :channel_id,
+                        :access_hash,
+                        :username,
+                        :title,
+                        :entity_version,
+                        :entity_json
+                    )
                     ON CONFLICT(identifier) DO UPDATE SET
                         entity_bytes=excluded.entity_bytes,
                         entity_type=excluded.entity_type,
@@ -908,6 +1044,8 @@ class CoordinatesDatabase:
                         access_hash=excluded.access_hash,
                         username=excluded.username,
                         title=excluded.title,
+                        entity_version=excluded.entity_version,
+                        entity_json=excluded.entity_json,
                         last_used=CURRENT_TIMESTAMP
                     """,
                     {
@@ -921,16 +1059,35 @@ class CoordinatesDatabase:
             return False
         return True
 
-    def get_cached_entity(self, identifier: str) -> Any:
-        """Retrieve a cached Telethon entity from the database if available."""
+    def get_cached_entity(
+        self,
+        identifier: str,
+        *,
+        max_age_hours: Optional[int] = None,
+    ) -> Optional[EntityCacheRecord]:
+        """Retrieve a cached Telethon entity record from the database if available."""
 
         if not identifier:
             return None
 
         identifier = str(identifier)
-
         cursor = self.connect().execute(
-            "SELECT entity_bytes FROM entity_cache WHERE identifier=?",
+            """
+            SELECT
+                identifier,
+                entity_bytes,
+                entity_type,
+                channel_id,
+                access_hash,
+                username,
+                title,
+                stored_at,
+                last_used,
+                entity_version,
+                entity_json
+            FROM entity_cache
+            WHERE identifier=?
+            """,
             (identifier,),
         )
         row = cursor.fetchone()
@@ -948,6 +1105,27 @@ class CoordinatesDatabase:
             LOGGER.debug("Failed to deserialize cached entity %s: %s", identifier, error)
             return None
 
+        stored_at = self._parse_timestamp(row["stored_at"])
+        record = EntityCacheRecord(
+            identifier=identifier,
+            entity=entity,
+            entity_type=row["entity_type"],
+            channel_id=row["channel_id"],
+            access_hash=row["access_hash"],
+            username=row["username"],
+            title=row["title"],
+            stored_at=stored_at,
+            last_used=self._parse_timestamp(row["last_used"]),
+            entity_version=row["entity_version"],
+            entity_json=row["entity_json"],
+        )
+
+        ttl_hours = max_age_hours if max_age_hours is not None else self.entity_cache_max_age_hours
+        if record.is_expired(ttl_hours):
+            LOGGER.info("Cached entity %s expired (age limit %sh); purging", identifier, ttl_hours)
+            self.remove_cached_entities([identifier])
+            return None
+
         try:
             with self.connect():
                 self.connect().execute(
@@ -955,9 +1133,100 @@ class CoordinatesDatabase:
                     (identifier,),
                 )
         except sqlite3.DatabaseError:  # pragma: no cover - cache hit is best-effort
-            pass
+            LOGGER.debug("Failed to update last_used timestamp for %s", identifier)
 
-        return entity
+        return record
+
+    def bulk_get_cached_entities(
+        self, identifiers: Iterable[str], *, max_age_hours: Optional[int] = None
+    ) -> Dict[str, EntityCacheRecord]:
+        """Return cached entity records for the provided *identifiers*."""
+
+        normalized = [str(identifier) for identifier in identifiers if identifier]
+        if not normalized:
+            return {}
+
+        placeholders = ",".join("?" for _ in normalized)
+        cursor = self.connect().execute(
+            f"SELECT * FROM entity_cache WHERE identifier IN ({placeholders})",
+            normalized,
+        )
+        results: Dict[str, EntityCacheRecord] = {}
+        ttl_hours = max_age_hours if max_age_hours is not None else self.entity_cache_max_age_hours
+
+        for row in cursor.fetchall():
+            identifier = row["identifier"]
+            raw_bytes = row["entity_bytes"]
+            if raw_bytes is None:
+                continue
+            try:
+                reader = BinaryReader(bytes(raw_bytes))
+                entity = reader.tgread_object()
+            except (TypeError, ValueError, struct.error):  # pragma: no cover - defensive
+                continue
+
+            record = EntityCacheRecord(
+                identifier=identifier,
+                entity=entity,
+                entity_type=row["entity_type"],
+                channel_id=row["channel_id"],
+                access_hash=row["access_hash"],
+                username=row["username"],
+                title=row["title"],
+                stored_at=self._parse_timestamp(row["stored_at"]),
+                last_used=self._parse_timestamp(row["last_used"]),
+                entity_version=row["entity_version"],
+                entity_json=row["entity_json"],
+            )
+
+            if ttl_hours and record.is_expired(ttl_hours):
+                self.remove_cached_entities([identifier])
+                continue
+
+            results[identifier] = record
+
+        return results
+
+    def remove_cached_entities(self, identifiers: Iterable[str]) -> int:
+        """Remove cached entity entries for *identifiers*."""
+
+        ids = [str(identifier) for identifier in identifiers if identifier]
+        if not ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in ids)
+        with self.connect():
+            cursor = self.connect().execute(
+                f"DELETE FROM entity_cache WHERE identifier IN ({placeholders})",
+                ids,
+            )
+        return cursor.rowcount
+
+    def purge_entity_cache(self, max_age_hours: Optional[int] = None) -> int:
+        """Remove cached entities older than *max_age_hours*."""
+
+        ttl_hours = max_age_hours if max_age_hours is not None else self.entity_cache_max_age_hours
+        if ttl_hours <= 0:
+            return 0
+
+        cutoff = _dt.datetime.now(_dt.UTC) - _dt.timedelta(hours=ttl_hours)
+        with self.connect():
+            cursor = self.connect().execute(
+                "DELETE FROM entity_cache WHERE stored_at < ?",
+                (cutoff.isoformat(),),
+            )
+        return cursor.rowcount
+
+    def _parse_timestamp(self, value: Any) -> Optional[_dt.datetime]:
+        if not value:
+            return None
+        if isinstance(value, _dt.datetime):
+            return value
+        try:
+            return _dt.datetime.fromisoformat(str(value)).replace(tzinfo=_dt.UTC)
+        except (TypeError, ValueError):
+            return None
+
 
     def update_channel_statistics(self, channel_id: int) -> bool:
         connection = self.connect()
