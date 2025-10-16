@@ -52,6 +52,7 @@ class CoordinatesDatabase:
         self._connection: Optional[sqlite3.Connection] = None
         self.connect()
         self.initialize_schema()
+        self._ensure_search_history_table()
 
     # ------------------------------------------------------------------
     # Connection helpers
@@ -248,6 +249,7 @@ class CoordinatesDatabase:
                     connection.execute(statement)
 
                 self._ensure_recommended_channels_schema(connection)
+                self._ensure_search_history_table(connection)
 
             config = Config()
             if config.database_wal_mode:
@@ -306,6 +308,138 @@ class CoordinatesDatabase:
                     )
                     continue
                 raise
+
+    def _ensure_search_history_table(
+        self, connection: Optional[sqlite3.Connection] = None
+    ) -> None:
+        """Ensure the chat search history table exists."""
+
+        connection = connection or self.connect()
+        with connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_search_history (
+                    chat_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    chat_name TEXT,
+                    last_searched_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    keywords_found TEXT,
+                    match_count INTEGER DEFAULT 0,
+                    search_complete BOOLEAN DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_search_history_date
+                ON chat_search_history(last_searched_date)
+                """
+            )
+
+    def was_chat_recently_searched(self, chat_id: int, days: int = 7) -> bool:
+        """Return ``True`` if *chat_id* was searched within the last *days* days."""
+
+        cutoff = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=days)
+        cursor = self.connect().execute(
+            """
+            SELECT 1 FROM chat_search_history
+            WHERE chat_id = ?
+              AND last_searched_date >= ?
+              AND search_complete = 1
+            LIMIT 1
+            """,
+            (chat_id, cutoff.isoformat()),
+        )
+        return cursor.fetchone() is not None
+
+    def record_chat_search(
+        self,
+        chat_id: int,
+        keywords_found: Optional[List[str]] = None,
+        match_count: int = 0,
+        username: Optional[str] = None,
+        chat_name: Optional[str] = None,
+    ) -> None:
+        """Record search metadata for *chat_id* in the search history table."""
+
+        keywords_json = json.dumps(keywords_found or [])
+        connection = self.connect()
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO chat_search_history (
+                    chat_id,
+                    username,
+                    chat_name,
+                    keywords_found,
+                    match_count,
+                    last_searched_date
+                )
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    username = excluded.username,
+                    chat_name = excluded.chat_name,
+                    keywords_found = excluded.keywords_found,
+                    match_count = excluded.match_count,
+                    last_searched_date = CURRENT_TIMESTAMP,
+                    search_complete = 1
+                """,
+                (chat_id, username, chat_name, keywords_json, match_count),
+            )
+
+    def get_chat_search_history(
+        self, limit: int = 100, with_matches_only: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Return cached chat search metadata."""
+
+        where_clause = "WHERE match_count > 0" if with_matches_only else ""
+        cursor = self.connect().execute(
+            f"""
+            SELECT
+                chat_id,
+                username,
+                chat_name,
+                keywords_found,
+                match_count,
+                last_searched_date
+            FROM chat_search_history
+            {where_clause}
+            ORDER BY last_searched_date DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
+        results: List[Dict[str, Any]] = []
+        for row in cursor.fetchall():
+            record = dict(row)
+            try:
+                record["keywords_found"] = json.loads(record["keywords_found"])
+            except (TypeError, json.JSONDecodeError):
+                record["keywords_found"] = []
+            results.append(record)
+
+        return results
+
+    def clear_search_history(self, older_than_days: Optional[int] = None) -> int:
+        """Remove cached chat search records and return the number removed."""
+
+        connection = self.connect()
+        if older_than_days is not None:
+            cutoff = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=older_than_days)
+            with connection:
+                cursor = connection.execute(
+                    "DELETE FROM chat_search_history WHERE last_searched_date < ?",
+                    (cutoff.isoformat(),),
+                )
+        else:
+            with connection:
+                cursor = connection.execute("DELETE FROM chat_search_history")
+
+        deleted = cursor.rowcount if cursor is not None else 0
+        LOGGER.info("Cleared %d search history records", deleted)
+        return deleted
 
     def close(self) -> None:
         """Close the active SQLite connection."""
