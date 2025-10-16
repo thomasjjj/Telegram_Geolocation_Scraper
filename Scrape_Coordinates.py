@@ -323,14 +323,15 @@ async def _search_dialogs_for_keywords(
     skip_recently_searched: bool = True,
     concurrent_searches: int = 5,
 ) -> List[SearchResult]:
-    """Search Telegram chats for keywords using optimised strategies."""
+    """Search Telegram chats for keywords using optimised local iteration."""
 
     cutoff: Optional[datetime.datetime] = None
     if days_limit is not None:
         cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days_limit)
 
-    keyword_list = list(keywords)
-    lowered_keywords = {kw.lower() for kw in keyword_list if kw}
+    keyword_list = [kw for kw in keywords if kw]
+    keyword_pairs = [(kw, kw.lower()) for kw in keyword_list]
+    lowered_keywords = [lowered for _, lowered in keyword_pairs]
     keyword_pattern = (
         re.compile("|".join(re.escape(kw) for kw in lowered_keywords), re.IGNORECASE)
         if lowered_keywords
@@ -340,7 +341,7 @@ async def _search_dialogs_for_keywords(
     LOGGER.info(
         "Starting optimised chat search: session=%s, keywords=%d, concurrent=%d",
         session_name,
-        len(keyword_list),
+        len(keyword_pairs),
         concurrent_searches,
     )
 
@@ -353,9 +354,10 @@ async def _search_dialogs_for_keywords(
     print("\n" + "=" * 60)
     print("🔍 OPTIMIZED CHAT SEARCH")
     print("=" * 60)
-    print("✨ Using Telegram's search API for faster results")
-    print(f"⚡ Processing up to {concurrent_searches} chats concurrently")
-    print(f"🔎 Searching for {len(keyword_list)} keywords")
+    print("✨ Optimized with concurrent processing and smart caching")
+    print(f"⚡ Processing up to {concurrent_searches} chats simultaneously")
+    if keyword_pairs:
+        print(f"🔎 Checking ~200 recent messages per chat for {len(keyword_pairs)} keywords")
     if cutoff:
         print(f"📅 Messages since: {cutoff.strftime('%Y-%m-%d')}")
     print("\n⚠️  Press Ctrl+C at any time to cancel\n")
@@ -364,7 +366,7 @@ async def _search_dialogs_for_keywords(
     SKIP = object()
 
     async def search_single_chat(dialog, entity, chat_name: str):
-        """Search a single chat for keyword matches."""
+        """Search a single chat for keyword matches using local iteration."""
 
         nonlocal messages_scanned
 
@@ -373,13 +375,13 @@ async def _search_dialogs_for_keywords(
             if chat_id is not None and database.was_chat_recently_searched(chat_id, days=7):
                 return SKIP
 
-        if dialog.message:
-            last_message = dialog.message
+        last_message = getattr(dialog, "message", None)
+        if last_message is not None:
             if getattr(last_message, "id", 0) < 10:
                 return SKIP
 
             last_msg_date = getattr(last_message, "date", None)
-            if last_msg_date:
+            if last_msg_date is not None:
                 days_old = (datetime.datetime.now(datetime.UTC) - last_msg_date).days
                 if days_old > 365:
                     return SKIP
@@ -388,98 +390,100 @@ async def _search_dialogs_for_keywords(
         excerpt: Optional[str] = None
         match_count = 0
 
+        max_messages_to_check = message_limit if message_limit is not None else 200
+        if max_messages_to_check is not None and max_messages_to_check <= 0:
+            max_messages_to_check = 200
+
         try:
-            for keyword in keyword_list:
-                search_params: Dict[str, Any] = {
-                    "entity": entity,
-                    "search": keyword,
-                    "limit": 5,
-                }
-                if cutoff:
-                    search_params["offset_date"] = cutoff
+            async for message in client.iter_messages(
+                entity,
+                limit=max_messages_to_check,
+                offset_date=cutoff,
+            ):
+                messages_scanned += 1
 
-                try:
-                    async for message in client.search_messages(**search_params):
-                        match_count += 1
-                        messages_scanned += 1
+                message_text = message.text or ""
+                if not message_text:
+                    continue
 
-                        if not match_keyword:
-                            message_text = message.text or ""
-                            match_keyword = keyword
-                            lowered_keyword = keyword.lower()
-                            lowered_text = message_text.lower()
-                            idx = lowered_text.find(lowered_keyword)
-                            if idx >= 0:
-                                start_idx = max(idx - 40, 0)
-                                end_idx = min(idx + 80, len(message_text))
+                lowered_text = message_text.lower()
+
+                for original_keyword, lowered_keyword in keyword_pairs:
+                    if lowered_keyword not in lowered_text:
+                        continue
+
+                    match_count += 1
+
+                    if not match_keyword:
+                        match_keyword = original_keyword
+                        idx = lowered_text.find(lowered_keyword)
+                        if idx >= 0:
+                            start_idx = max(idx - 40, 0)
+                            end_idx = min(idx + 80, len(message_text))
+                            excerpt = message_text[start_idx:end_idx].replace("\n", " ")
+                        elif keyword_pattern:
+                            match = keyword_pattern.search(message_text)
+                            if match:
+                                start_idx = max(match.start() - 40, 0)
+                                end_idx = min(match.end() + 80, len(message_text))
                                 excerpt = message_text[start_idx:end_idx].replace("\n", " ")
-                            elif keyword_pattern:
-                                match = keyword_pattern.search(message_text)
-                                if match:
-                                    start_idx = max(match.start() - 40, 0)
-                                    end_idx = min(match.end() + 80, len(message_text))
-                                    excerpt = message_text[start_idx:end_idx].replace("\n", " ")
-                            if excerpt is None:
-                                excerpt = message_text[:120].replace("\n", " ")
+                        if excerpt is None:
+                            excerpt = message_text[:120].replace("\n", " ")
 
-                        if match_count >= 5:
-                            break
-
-                except FloodWaitError as error:
-                    wait_time = min(error.seconds, 60)
-                    print(f"\n⏳ Rate limited. Waiting {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                    continue
-                except Exception as exc:  # pragma: no cover - defensive logging only
-                    LOGGER.debug(
-                        "Search failed for %s with keyword '%s': %s",
-                        chat_name,
-                        keyword,
-                        exc,
-                    )
-                    continue
+                    break
 
                 if match_keyword:
                     break
 
-            if match_keyword:
-                if database:
-                    chat_id = getattr(entity, "id", None)
-                    if chat_id is not None:
-                        database.record_chat_search(
-                            chat_id=chat_id,
-                            username=getattr(entity, "username", None),
-                            chat_name=chat_name,
-                            keywords_found=[match_keyword],
-                            match_count=match_count,
-                        )
-
-                return {
-                    "dialog": dialog,
-                    "entity": entity,
-                    "keyword": match_keyword,
-                    "excerpt": excerpt,
-                    "match_count": match_count,
-                }
-
+        except FloodWaitError as error:
+            wait_time = min(error.seconds, 60)
+            print(f"\n⏳ Rate limited. Waiting {wait_time}s...")
+            await asyncio.sleep(wait_time)
         except Exception as exc:  # pragma: no cover - defensive logging only
-            LOGGER.error("Error searching chat %s: %s", chat_name, exc)
-            return None
+            LOGGER.debug("Error checking messages in %s: %s", chat_name, exc)
+
+        if match_keyword:
+            chat_id = getattr(entity, "id", None)
+            if database and chat_id is not None:
+                database.record_chat_search(
+                    chat_id=chat_id,
+                    username=getattr(entity, "username", None),
+                    chat_name=chat_name,
+                    keywords_found=[match_keyword],
+                    match_count=match_count,
+                )
+
+            return {
+                "dialog": dialog,
+                "entity": entity,
+                "keyword": match_keyword,
+                "excerpt": excerpt,
+                "match_count": match_count,
+            }
+
+        chat_id = getattr(entity, "id", None)
+        if database and chat_id is not None:
+            database.record_chat_search(
+                chat_id=chat_id,
+                username=getattr(entity, "username", None),
+                chat_name=chat_name,
+                keywords_found=[],
+                match_count=0,
+            )
 
         return None
 
     try:
         async with TelegramClient(session_name, api_id, api_hash) as client:
-            all_dialogs = []
+            all_dialogs: List[Any] = []
             async for dialog in client.iter_dialogs():
-                if dialog.is_user:
-                    continue
-                all_dialogs.append(dialog)
+                if not dialog.is_user:
+                    all_dialogs.append(dialog)
 
             total_dialogs = len(all_dialogs)
             update_interval = max(5, total_dialogs // 20) if total_dialogs else 5
 
-            print(f"📊 Found {total_dialogs} chats to search\n")
+            print(f"📊 Found {total_dialogs} chats to search")
 
             semaphore = asyncio.Semaphore(max(1, concurrent_searches))
 
@@ -522,7 +526,7 @@ async def _search_dialogs_for_keywords(
 
                     print(
                         f"✅ Match #{len(results)}: {chat_name} "
-                        f"(keyword: '{result['keyword']}', {result.get('match_count', 1)} occurrences)"
+                        f"(keyword: '{result["keyword"]}', {result.get("match_count", 1)} occurrences)"
                     )
 
                 if dialogs_checked % update_interval == 0 or dialogs_checked == total_dialogs:
@@ -572,7 +576,6 @@ async def _search_dialogs_for_keywords(
     )
 
     return results
-
 
 def _parse_channel_list(raw_value: str) -> List[str]:
     return [channel.strip() for channel in raw_value.split(",") if channel.strip()]
@@ -907,10 +910,11 @@ def handle_search_all_chats(
 
     print("\n⚠️  Search Settings:")
     print(f"   • Session: {session_name}")
-    print(
-        "   • Messages per chat: "
-        + (str(message_limit) if message_limit is not None else "All messages")
-    )
+    if message_limit is not None:
+        messages_per_chat_display = str(message_limit)
+    else:
+        messages_per_chat_display = "~200 recent messages (default)"
+    print(f"   • Messages per chat: {messages_per_chat_display}")
     print(
         f"   • Time limit: {'Last ' + str(days_limit) + ' days' if days_limit else 'All time'}"
     )
@@ -924,7 +928,7 @@ def handle_search_all_chats(
 
     LOGGER.info(
         "Searching all chats for geolocation keywords (limit=%s, days_limit=%s)",
-        message_limit if message_limit is not None else "all",
+        message_limit if message_limit is not None else "default",
         days_limit,
     )
     results = asyncio.run(
