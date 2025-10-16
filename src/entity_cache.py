@@ -1,14 +1,17 @@
 """Utilities for caching Telegram entities between API calls."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Iterable, List, Optional
 
 from telethon import TelegramClient
-from telethon.errors import RPCError
+from telethon.errors import FloodWaitError, RPCError
 from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
 from src.database import CoordinatesDatabase
+from src.rate_limiter import AdaptiveRateLimiter
+from src.telethon_session import ensure_connected
 
 
 LOGGER = logging.getLogger(__name__)
@@ -21,10 +24,15 @@ class EntityCache:
         self,
         client: TelegramClient,
         database: Optional[CoordinatesDatabase] = None,
+        *,
+        rate_limiter: Optional[AdaptiveRateLimiter] = None,
+        max_age_hours: Optional[int] = None,
     ) -> None:
         self.client = client
         self.database = database
         self._cache: Dict[str, Any] = {}
+        self.rate_limiter = rate_limiter
+        self.max_age_hours = max_age_hours
 
     async def get_entity(self, identifier: Any) -> Any:
         """Return the entity for *identifier*, caching the result when possible."""
@@ -37,21 +45,66 @@ class EntityCache:
 
         entity = None
         if self.database:
+            ttl = self._effective_ttl
             for key in keys:
-                entity = self.database.get_cached_entity(key)
-                if entity:
+                record = self.database.get_cached_entity(key, max_age_hours=ttl)
+                if record:
+                    entity = record.entity
                     LOGGER.debug("Loaded entity %s from database cache", key)
-                    self._store_entity(entity, keys)
+                    self._store_entity(entity, keys, persist=False)
                     return entity
 
         entity = await self._fetch_entity(lookup)
         self._store_entity(entity, keys)
         return entity
 
-    def _store_entity(self, entity: Any, keys: Iterable[str]) -> None:
+    async def get_entities_batch(
+        self,
+        identifiers: Iterable[Any],
+        *,
+        rate_limiter: Optional[AdaptiveRateLimiter] = None,
+    ) -> Dict[Any, Any]:
+        """Resolve multiple entities using cache and adaptive throttling."""
+
+        results: Dict[Any, Any] = {}
+        limiter = rate_limiter or self.rate_limiter
+
+        for identifier in identifiers:
+            try:
+                entity = await self.get_entity(identifier)
+                if entity is not None:
+                    results[identifier] = entity
+                    if limiter:
+                        limiter.record_success()
+            except FloodWaitError as exc:
+                wait_time = limiter.record_flood_wait(exc.seconds) if limiter else float(exc.seconds)
+                await asyncio.sleep(wait_time)
+            except RPCError as exc:
+                LOGGER.debug("RPC error while fetching entity %s: %s", identifier, exc)
+                if limiter:
+                    delay = limiter.record_error()
+                    await asyncio.sleep(delay)
+            except ValueError as exc:
+                LOGGER.debug("Failed to resolve entity %s: %s", identifier, exc)
+        return results
+
+    @property
+    def _effective_ttl(self) -> Optional[int]:
+        if self.max_age_hours is not None:
+            return self.max_age_hours
+        if self.database is not None:
+            return self.database.entity_cache_max_age_hours
+        return None
+
+    async def _throttle(self, limiter: Optional[AdaptiveRateLimiter] = None) -> None:
+        limiter = limiter or self.rate_limiter
+        if limiter:
+            await limiter.throttle()
+
+    def _store_entity(self, entity: Any, keys: Iterable[str], *, persist: bool = True) -> None:
         for key in keys:
             self._cache[key] = entity
-            if self.database:
+            if self.database and persist:
                 self.database.cache_entity(key, entity)
 
         extra_keys = set()
@@ -64,7 +117,7 @@ class EntityCache:
 
         for key in extra_keys:
             self._cache[key] = entity
-            if self.database:
+            if self.database and persist:
                 self.database.cache_entity(key, entity)
 
     @staticmethod
@@ -178,14 +231,19 @@ class EntityCache:
         return None
 
     async def _fetch_entity(self, lookup: Dict[str, Any]) -> Any:
+        await ensure_connected(self.client)
+        limiter = self.rate_limiter
+
         peer_reference = self._build_peer_reference(
             lookup.get("peer_type"), lookup.get("entity_id")
         )
 
         if peer_reference is not None:
             try:
-                return await self.client.get_entity(peer_reference)
-            except (RPCError, ValueError):
+                return await self._request_with_retry(
+                    lambda: self.client.get_entity(peer_reference), limiter
+                )
+            except ValueError:
                 LOGGER.debug(
                     "Entity resolution failed for %s using peer %s",
                     lookup.get("entity_id"),
@@ -195,20 +253,26 @@ class EntityCache:
         username = lookup.get("username")
         if username:
             try:
-                return await self.client.get_entity(username)
-            except (RPCError, ValueError):
+                return await self._request_with_retry(
+                    lambda: self.client.get_entity(username), limiter
+                )
+            except ValueError:
                 LOGGER.debug("Entity resolution via username %s failed", username)
 
         query = lookup.get("query")
         try:
-            return await self.client.get_entity(query)
+            return await self._request_with_retry(
+                lambda: self.client.get_entity(query), limiter
+            )
         except (RPCError, ValueError, TypeError):
             LOGGER.debug("Entity resolution failed for query %s", query)
 
         entity_id = lookup.get("entity_id")
         if entity_id is not None:
             try:
-                return await self.client.get_entity(int(entity_id))
+                return await self._request_with_retry(
+                    lambda: self.client.get_entity(int(entity_id)), limiter
+                )
             except (RPCError, ValueError):
                 LOGGER.debug("Entity resolution failed for id %s", entity_id)
 
@@ -217,3 +281,30 @@ class EntityCache:
             return entity
 
         raise ValueError(f"Unable to resolve entity for identifier {query}")
+
+    async def _request_with_retry(
+        self,
+        func,
+        limiter: Optional[AdaptiveRateLimiter],
+        *,
+        max_attempts: int = 5,
+    ):
+        attempts = 0
+        while True:
+            attempts += 1
+            await self._throttle(limiter)
+            try:
+                result = await func()
+                if limiter:
+                    limiter.record_success()
+                return result
+            except FloodWaitError as exc:
+                wait_time = limiter.record_flood_wait(exc.seconds) if limiter else float(exc.seconds)
+                await asyncio.sleep(wait_time)
+            except RPCError as exc:
+                LOGGER.debug("RPC error during entity fetch: %s", exc)
+                if attempts >= max_attempts:
+                    raise
+                delay = limiter.record_error() if limiter else min(5 * attempts, 30)
+                await asyncio.sleep(delay)
+

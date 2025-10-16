@@ -33,6 +33,9 @@ from src.coordinates import extract_coordinates
 from src.database import CoordinatesDatabase
 from src.export import save_dataframe_to_kml, save_dataframe_to_kmz
 from src.entity_cache import EntityCache
+from src.rate_limiter import AdaptiveRateLimiter
+from src.telethon_session import ensure_connected
+from src.url_analysis import extract_links, serialize_links
 
 if TYPE_CHECKING:  # pragma: no cover - optional dependency for type checking
     from src.recommendations import RecommendationManager
@@ -157,6 +160,8 @@ async def fetch_messages_in_batches(
 
     batch: List[Any] = []
 
+    await ensure_connected(client)
+
     async for message in client.iter_messages(entity, **iter_kwargs):
         if not message:
             continue
@@ -195,6 +200,8 @@ async def _process_message_batch(
         return batch_stats
 
     existing_ids: set[int] = set()
+    links_to_insert: Dict[int, List[Dict[str, Optional[str]]]] = {}
+
     if database:
         existing_ids = database.bulk_check_message_existence(channel_id, message_ids)
         if skip_existing:
@@ -249,6 +256,10 @@ async def _process_message_batch(
 
         messages_to_insert.append(message_record)
 
+        extracted_links = serialize_links(extract_links(message_text or ""))
+        if extracted_links:
+            links_to_insert[message.id] = extracted_links
+
         if has_coordinates:
             message_date_str = message.date.strftime("%Y-%m-%d") if message.date else None
             if channel_username:
@@ -287,6 +298,17 @@ async def _process_message_batch(
 
             if coordinate_batch:
                 database.bulk_add_coordinates(coordinate_batch)
+
+        if links_to_insert:
+            link_payload: Dict[int, List[Dict[str, Optional[str]]]] = {}
+            for message_id, links in links_to_insert.items():
+                row_id = id_map.get(message_id)
+                if not row_id:
+                    continue
+                link_payload[row_id] = links
+
+            if link_payload:
+                database.add_message_links(link_payload)
 
     else:
         id_map: Dict[int, int] = {}
@@ -396,7 +418,15 @@ async def scrape_channel(
     stats = ScrapeStats(channel_id=0)
 
     try:
-        cache = entity_cache or EntityCache(client, database)
+        cache = entity_cache or EntityCache(
+            client,
+            database,
+            rate_limiter=AdaptiveRateLimiter(
+                base_delay=_CONFIG.rate_limit_base_delay,
+                max_delay=_CONFIG.rate_limit_max_delay,
+            ),
+            max_age_hours=_CONFIG.entity_cache_max_age_hours,
+        )
         entity = await cache.get_entity(channel_id)
         resolved_channel_id = getattr(entity, "id", channel_id)
         channel_display_name = (
@@ -618,9 +648,30 @@ def channel_scraper(
                 session_type = "single_channel" if len(channel_list) == 1 else "multi_channel"
                 session_id = database_instance.start_session(session_type)
             total_skipped = total_new = total_coords = 0
-            entity_cache = EntityCache(client, database_instance)
+            limiter = AdaptiveRateLimiter(
+                base_delay=_CONFIG.rate_limit_base_delay,
+                max_delay=_CONFIG.rate_limit_max_delay,
+            )
+            entity_cache = EntityCache(
+                client,
+                database_instance,
+                rate_limiter=limiter,
+                max_age_hours=_CONFIG.entity_cache_max_age_hours,
+            )
+            progress_iterator = channel_list
+            progress_bar = None
+            if len(channel_list) > 1:
+                try:
+                    from tqdm import tqdm
+
+                    progress_bar = tqdm(channel_list, desc="Scraping channels", unit="channel")
+                    progress_iterator = progress_bar
+                except ImportError:
+                    LOGGER.debug("tqdm is not installed; progress bar disabled")
             try:
-                for idx, channel in enumerate(channel_list, start=1):
+                for idx, channel in enumerate(progress_iterator, start=1):
+                    if progress_bar:
+                        progress_bar.set_postfix_str(str(channel))
                     LOGGER.info("[%s/%s] Scraping channel: %s", idx, len(channel_list), channel)
                     stats = await scrape_channel(
                         client,
@@ -647,6 +698,8 @@ def channel_scraper(
                     total_coords += stats.coordinates_found
 
             finally:
+                if progress_bar:
+                    progress_bar.close()
                 if database_instance and session_id:
                     database_instance.end_session(
                         session_id,
