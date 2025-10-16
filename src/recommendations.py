@@ -593,9 +593,10 @@ class RecommendationManager:
         updated = 0
 
         for row in rows:
-            channel_id = row["channel_id"]
-            old_score = float(row.get("recommendation_score") or 0.0)
-            new_score = self.calculate_recommendation_score(dict(row))
+            row_dict = dict(row)
+            channel_id = row_dict["channel_id"]
+            old_score = float(row_dict.get("recommendation_score") or 0.0)
+            new_score = self.calculate_recommendation_score(row_dict)
 
             if abs(new_score - old_score) <= 0.1:
                 continue
@@ -607,12 +608,12 @@ class RecommendationManager:
             updated += 1
 
             if verbose:
-                forward_count = int(row.get("forward_count") or 0)
-                coord_count = int(row.get("coordinate_forward_count") or 0)
+                forward_count = int(row_dict.get("forward_count") or 0)
+                coord_count = int(row_dict.get("coordinate_forward_count") or 0)
                 hit_rate = (coord_count / forward_count * 100) if forward_count else 0.0
                 LOGGER.info(
                     "Recalculated score for %s: %.1f -> %.1f (hit rate %.1f%%)",
-                    row.get("username") or channel_id,
+                    row_dict.get("username") or channel_id,
                     old_score,
                     new_score,
                     hit_rate,
