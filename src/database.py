@@ -162,6 +162,7 @@ class CoordinatesDatabase:
                 username TEXT,
                 title TEXT,
                 channel_type TEXT,
+                peer_type TEXT DEFAULT 'channel',
                 entity_type TEXT,
                 first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
                 last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -285,6 +286,7 @@ class CoordinatesDatabase:
             "telegram_recommendation_count": "ALTER TABLE recommended_channels ADD COLUMN telegram_recommendation_count INTEGER DEFAULT 0",
             "telegram_rec_source_density": "ALTER TABLE recommended_channels ADD COLUMN telegram_rec_source_density REAL DEFAULT 0.0",
             "last_harvest_date": "ALTER TABLE recommended_channels ADD COLUMN last_harvest_date DATETIME",
+            "peer_type": "ALTER TABLE recommended_channels ADD COLUMN peer_type TEXT DEFAULT 'channel'",
         }
 
         for column_name, statement in migrations.items():
@@ -954,6 +956,7 @@ class CoordinatesDatabase:
             "username",
             "title",
             "channel_type",
+            "peer_type",
             "entity_type",
             "first_seen",
             "last_seen",
@@ -1015,6 +1018,7 @@ class CoordinatesDatabase:
             "username",
             "title",
             "channel_type",
+            "peer_type",
             "entity_type",
             "first_seen",
             "last_seen",
@@ -1107,7 +1111,7 @@ class CoordinatesDatabase:
             removed_ids.update(invalid_status)
 
         # Remove entries recorded as users
-        invalid_type = _select_ids("entity_type = ?", ("user",))
+        invalid_type = _select_ids("entity_type = ? OR peer_type = ?", ("user", "user"))
         invalid_type = [cid for cid in invalid_type if cid not in removed_ids]
         if invalid_type:
             with connection:
