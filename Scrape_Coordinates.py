@@ -999,18 +999,25 @@ def _run_recommended_scrape(
                 print(f"Enrichment failed: {exc}")
                 print("Continuing with available data...")
 
-    identifiers: List[str] = []
+    identifiers: List[Any] = []
     for recommendation in recommendations:
         username = recommendation.get("username")
+        channel_id = recommendation["channel_id"]
+        peer_type = recommendation.get("peer_type") or recommendation.get("entity_type")
+        peer_type_normalised = str(peer_type).lower() if peer_type else None
+        if peer_type_normalised in {"supergroup", "megagroup", "group"}:
+            peer_type_normalised = "chat"
+        elif peer_type_normalised not in {"channel", "chat", "user"}:
+            peer_type_normalised = "channel"
+
+        identifier_payload: Dict[str, Any] = {
+            "id": channel_id,
+            "peer_type": peer_type_normalised or "channel",
+        }
         if username:
-            # Use username if available (most reliable)
-            identifiers.append(username)
-        else:
-            channel_id = recommendation["channel_id"]
-            # Telethon expects identifiers that it can resolve via ``get_entity``.
-            # Using a ``PeerChannel`` instance here would require an ``access_hash``,
-            # so fallback to the channel ID string instead.
-            identifiers.append(str(channel_id))
+            identifier_payload["username"] = username
+
+        identifiers.append(identifier_payload)
 
     print(f"Preparing to scrape {len(identifiers)} channel(s).")
     LOGGER.info("Scraping %d recommended channels", len(identifiers))

@@ -160,6 +160,8 @@ class RecommendationManager:
                 update_data["username"] = forward_info["username"]
             if forward_info.get("entity_type") and not existing.get("entity_type"):
                 update_data["entity_type"] = forward_info["entity_type"]
+            if forward_info.get("peer_type") and not existing.get("peer_type"):
+                update_data["peer_type"] = forward_info["peer_type"]
 
             self.db.update_recommended_channel(source_channel_id, update_data)
             created = False
@@ -168,6 +170,7 @@ class RecommendationManager:
                 "username": forward_info.get("username"),
                 "title": forward_info.get("title"),
                 "channel_type": forward_info.get("channel_type"),
+                "peer_type": forward_info.get("peer_type"),
                 "entity_type": forward_info.get("entity_type"),
                 "first_seen": now_iso,
                 "last_seen": now_iso,
@@ -251,6 +254,7 @@ class RecommendationManager:
                     "channel_id": chat.id,
                     "username": getattr(chat, "username", None),
                     "title": getattr(chat, "title", None),
+                    "peer_type": "channel",
                     "participants_count": getattr(chat, "participants_count", None),
                     "verified": getattr(chat, "verified", False),
                     "scam": getattr(chat, "scam", False),
@@ -433,6 +437,7 @@ class RecommendationManager:
             "username": rec.get("username"),
             "title": rec.get("title"),
             "channel_type": "channel",
+            "peer_type": rec.get("peer_type", "channel"),
             "first_seen": now_iso,
             "last_seen": now_iso,
             "discovered_from_channels": json.dumps([source_channel_id]),
@@ -494,6 +499,8 @@ class RecommendationManager:
             update_data["title"] = rec["title"]
         if not existing.get("username") and rec.get("username"):
             update_data["username"] = rec["username"]
+        if not existing.get("peer_type") and rec.get("peer_type"):
+            update_data["peer_type"] = rec["peer_type"]
         if not existing.get("subscriber_count") and rec.get("participants_count"):
             update_data["subscriber_count"] = rec["participants_count"]
 
@@ -680,8 +687,17 @@ class RecommendationManager:
         )
 
     async def enrich_recommendation(self, client: TelegramClient, channel_id: int) -> bool:
+        record = self.db.get_recommended_channel(channel_id) if self.db else None
+        peer_type = record.get("peer_type") if record else None
+        username = record.get("username") if record else None
+
         try:
-            entity = await client.get_entity(channel_id)
+            entity = await self._resolve_entity(
+                client,
+                channel_id,
+                peer_type=peer_type,
+                username=username,
+            )
 
             if not self._is_channel_entity(entity):
                 entity_type = type(entity).__name__
@@ -782,32 +798,63 @@ class RecommendationManager:
         if not header:
             return None
 
-        peer = getattr(header, "from_id", None)
-        channel_id: Optional[int] = None
-        entity_type: Optional[str] = None
-        if isinstance(peer, PeerChannel):
-            channel_id = peer.channel_id
-            entity_type = "channel"
-        elif isinstance(peer, PeerChat):
-            channel_id = peer.chat_id
-            entity_type = "supergroup"
-        elif isinstance(peer, PeerUser):
+        peer_details = self._parse_forward_peer(getattr(header, "from_id", None))
+        if not peer_details:
             return None
 
-        if channel_id is None:
-            return None
+        channel_id = peer_details["id"]
 
         return {
             "channel_id": int(channel_id),
-            "entity_type": entity_type,
+            "peer_type": peer_details.get("peer_type"),
+            "entity_type": peer_details.get("entity_type"),
+            "channel_type": peer_details.get("channel_type"),
             "forward_date": getattr(header, "date", None),
             "forward_signature": getattr(header, "post_author", None),
             "title": getattr(header, "from_name", None),
         }
 
+    @staticmethod
+    def _parse_forward_peer(peer) -> Optional[Dict[str, Any]]:
+        if peer is None:
+            return None
+
+        if isinstance(peer, PeerChannel):
+            return {
+                "id": int(peer.channel_id),
+                "peer_type": "channel",
+                "entity_type": "channel",
+                "channel_type": "channel",
+            }
+
+        if isinstance(peer, PeerChat):
+            return {
+                "id": int(peer.chat_id),
+                "peer_type": "chat",
+                "entity_type": "supergroup",
+                "channel_type": "supergroup",
+            }
+
+        if isinstance(peer, PeerUser):
+            return {
+                "id": int(peer.user_id),
+                "peer_type": "user",
+                "entity_type": "user",
+                "channel_type": None,
+            }
+
+        return None
+
     def _is_valid_channel_id(
         self, channel_id: int, forward_info: Dict[str, Any]
     ) -> bool:
+        peer_type = self._normalise_peer_type(forward_info.get("peer_type"))
+        if peer_type == "user":
+            return False
+
+        if peer_type in {"channel", "chat"}:
+            return True
+
         entity_type = forward_info.get("entity_type")
 
         if entity_type == "user":
@@ -836,6 +883,95 @@ class RecommendationManager:
         if isinstance(entity, Chat):
             return "group"
         return type(entity).__name__.lower()
+
+    @staticmethod
+    def _normalise_peer_type(peer_type: Optional[str]) -> Optional[str]:
+        if not peer_type:
+            return None
+
+        value = str(peer_type).lower()
+        if value in {"peerchannel", "channel"}:
+            return "channel"
+        if value in {"peerchat", "chat", "supergroup", "megagroup", "group"}:
+            return "chat"
+        if value in {"peeruser", "user"}:
+            return "user"
+        return value
+
+    @staticmethod
+    def _build_peer_reference(peer_type: Optional[str], entity_id: Optional[int]):
+        if peer_type is None or entity_id is None:
+            return None
+
+        try:
+            numeric_id = int(entity_id)
+        except (TypeError, ValueError):
+            return None
+
+        if peer_type == "channel":
+            return PeerChannel(channel_id=numeric_id)
+        if peer_type == "chat":
+            return PeerChat(chat_id=numeric_id)
+        if peer_type == "user":
+            return PeerUser(user_id=numeric_id)
+        return None
+
+    async def _find_entity_in_dialogs(
+        self, client: TelegramClient, entity_id: Optional[int]
+    ) -> Optional[Any]:
+        if entity_id is None:
+            return None
+
+        try:
+            target_id = int(entity_id)
+        except (TypeError, ValueError):
+            return None
+
+        async for dialog in client.iter_dialogs():
+            dialog_entity = getattr(dialog, "entity", None)
+            if getattr(dialog_entity, "id", None) == target_id:
+                return dialog_entity
+        return None
+
+    async def _resolve_entity(
+        self,
+        client: TelegramClient,
+        channel_id: int,
+        *,
+        peer_type: Optional[str] = None,
+        username: Optional[str] = None,
+    ):
+        normalised_peer = self._normalise_peer_type(peer_type)
+        peer_reference = self._build_peer_reference(normalised_peer, channel_id)
+
+        if peer_reference is not None:
+            try:
+                return await client.get_entity(peer_reference)
+            except (RPCError, ValueError):
+                LOGGER.debug(
+                    "Failed to resolve entity %s using peer type %s", channel_id, normalised_peer
+                )
+
+        if username:
+            try:
+                return await client.get_entity(username)
+            except (RPCError, ValueError):
+                LOGGER.debug(
+                    "Failed to resolve entity %s via username %s", channel_id, username
+                )
+
+        try:
+            return await client.get_entity(channel_id)
+        except (RPCError, ValueError):
+            LOGGER.debug("Direct resolution by id failed for entity %s", channel_id)
+
+        entity = await self._find_entity_in_dialogs(client, channel_id)
+        if entity:
+            return entity
+
+        raise ValueError(
+            f"Cannot resolve entity {channel_id} of type {normalised_peer or 'unknown'}"
+        )
 
     def get_recommended_channel(self, channel_id: int) -> Optional[Dict[str, Any]]:
         return self.db.get_recommended_channel(channel_id)

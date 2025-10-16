@@ -60,6 +60,7 @@ def test_fetch_telegram_recommendations_success(recommendation_manager: Recommen
     assert recommendations[0]["channel_id"] == 12345
     assert recommendations[0]["username"] == "test_channel"
     assert recommendations[0]["verified"] is True
+    assert recommendations[0]["peer_type"] == "channel"
 
 
 def test_harvest_telegram_recommendations_integration(

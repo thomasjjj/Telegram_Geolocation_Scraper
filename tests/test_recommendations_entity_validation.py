@@ -34,14 +34,19 @@ def _build_forward(message_peer) -> SimpleNamespace:
     return SimpleNamespace(from_id=message_peer, date=None, post_author=None, from_name="Test")
 
 
-def test_extract_forward_info_filters_user(
+def test_extract_forward_info_identifies_user(
     recommendation_manager: RecommendationManager,
 ) -> None:
     message = SimpleNamespace(forward=_build_forward(PeerUser(user_id=123456)))
 
     result = recommendation_manager._extract_forward_info(message)
 
-    assert result is None
+    assert result is not None
+    assert result["peer_type"] == "user"
+    assert (
+        recommendation_manager._is_valid_channel_id(result["channel_id"], result)
+        is False
+    )
 
 
 def test_extract_forward_info_accepts_channels(
@@ -56,6 +61,24 @@ def test_extract_forward_info_accepts_channels(
     assert result is not None
     assert result["channel_id"] == 1234567890
     assert result["entity_type"] == "channel"
+    assert result["peer_type"] == "channel"
+
+
+def test_extract_forward_info_accepts_peer_chat(
+    recommendation_manager: RecommendationManager,
+) -> None:
+    message = SimpleNamespace(
+        forward=_build_forward(PeerChat(chat_id=987654321))
+    )
+
+    result = recommendation_manager._extract_forward_info(message)
+
+    assert result is not None
+    assert result["peer_type"] == "chat"
+    assert (
+        recommendation_manager._is_valid_channel_id(result["channel_id"], result)
+        is True
+    )
 
 
 def test_is_valid_channel_id_rejects_low_ids(
