@@ -162,6 +162,32 @@ class CoordinatesDatabase:
                 error_log TEXT
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS db_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS import_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                import_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source_file TEXT,
+                source_device TEXT,
+                import_type TEXT,
+                messages_imported INTEGER DEFAULT 0,
+                messages_updated INTEGER DEFAULT 0,
+                messages_skipped INTEGER DEFAULT 0,
+                coordinates_imported INTEGER DEFAULT 0,
+                channels_added INTEGER DEFAULT 0,
+                channels_updated INTEGER DEFAULT 0,
+                recommendations_merged INTEGER DEFAULT 0,
+                conflicts_resolved INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'completed',
+                error_log TEXT
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id)",
             "CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(message_date)",
             "CREATE INDEX IF NOT EXISTS idx_messages_coordinates ON messages(has_coordinates)",
@@ -296,6 +322,7 @@ class CoordinatesDatabase:
                 self._ensure_recommended_channels_schema(connection)
                 self._ensure_search_history_table(connection)
                 self._ensure_entity_cache_schema(connection)
+                self._ensure_sync_metadata_schema(connection)
 
             config = Config()
             if config.database_wal_mode:
@@ -403,6 +430,65 @@ class CoordinatesDatabase:
             except sqlite3.DatabaseError as exc:  # pragma: no cover - defensive
                 LOGGER.error("Failed to migrate entity_cache schema (%s): %s", column_name, exc)
                 raise
+
+    def _ensure_sync_metadata_schema(self, connection: sqlite3.Connection) -> None:
+        """Ensure auxiliary tables and columns for database synchronisation exist."""
+
+        columns = connection.execute("PRAGMA table_info(messages)").fetchall()
+        column_names = {row[1] for row in columns}
+
+        migrations = {
+            "sync_hash": "ALTER TABLE messages ADD COLUMN sync_hash TEXT",
+            "source_device": "ALTER TABLE messages ADD COLUMN source_device TEXT",
+            "import_batch_id": "ALTER TABLE messages ADD COLUMN import_batch_id TEXT",
+        }
+
+        for column_name, statement in migrations.items():
+            if column_name in column_names:
+                continue
+            try:
+                connection.execute(statement)
+                LOGGER.info("Added missing column %s to messages table", column_name)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" in str(exc).lower():
+                    LOGGER.debug(
+                        "Column %s already exists on messages (detected during migration)",
+                        column_name,
+                    )
+                    continue
+                raise
+
+        with connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS db_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS import_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    import_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    source_file TEXT,
+                    source_device TEXT,
+                    import_type TEXT,
+                    messages_imported INTEGER DEFAULT 0,
+                    messages_updated INTEGER DEFAULT 0,
+                    messages_skipped INTEGER DEFAULT 0,
+                    coordinates_imported INTEGER DEFAULT 0,
+                    channels_added INTEGER DEFAULT 0,
+                    channels_updated INTEGER DEFAULT 0,
+                    recommendations_merged INTEGER DEFAULT 0,
+                    conflicts_resolved INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'completed',
+                    error_log TEXT
+                )
+                """
+            )
 
     def was_chat_recently_searched(self, chat_id: int, days: int = 7) -> bool:
         """Return ``True`` if *chat_id* was searched within the last *days* days."""
@@ -797,6 +883,39 @@ class CoordinatesDatabase:
         )
         row = cursor.fetchone()
         return int(row["latest"]) if row and row["latest"] is not None else None
+
+    def get_messages_since(self, timestamp: _dt.datetime) -> List[Dict[str, Any]]:
+        """Return messages updated after *timestamp* sorted by ``last_updated``."""
+
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+
+        cursor = self.connect().execute(
+            """
+            SELECT * FROM messages
+            WHERE last_updated > ?
+            ORDER BY last_updated ASC
+            """,
+            (timestamp.isoformat(),),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_channel_progress_map(self) -> Dict[int, int]:
+        """Return mapping of ``channel_id`` to the highest ``message_id`` stored."""
+
+        cursor = self.connect().execute(
+            """
+            SELECT channel_id, MAX(message_id) AS latest_id
+            FROM messages
+            GROUP BY channel_id
+            """
+        )
+        progress: Dict[int, int] = {}
+        for row in cursor.fetchall():
+            if row["latest_id"] is None:
+                continue
+            progress[int(row["channel_id"])] = int(row["latest_id"])
+        return progress
 
     def get_message_count(self, channel_id: int) -> int:
         cursor = self.connect().execute(
@@ -1683,6 +1802,73 @@ class CoordinatesDatabase:
             average_density=average_density,
             last_scrape=last_scrape,
         )
+
+    def get_metadata(self, key: str) -> Optional[str]:
+        cursor = self.connect().execute(
+            "SELECT value FROM db_metadata WHERE key=?",
+            (key,),
+        )
+        row = cursor.fetchone()
+        return row["value"] if row else None
+
+    def set_metadata(self, key: str, value: str) -> None:
+        with self.connect():
+            self.connect().execute(
+                """
+                INSERT INTO db_metadata (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (key, value),
+            )
+
+    def get_schema_version(self) -> str:
+        version = self.get_metadata("schema_version")
+        if version:
+            return version
+        self.set_metadata("schema_version", "1")
+        return "1"
+
+    def log_import_history(self, payload: Dict[str, Any]) -> None:
+        allowed = {
+            "source_file",
+            "source_device",
+            "import_type",
+            "messages_imported",
+            "messages_updated",
+            "messages_skipped",
+            "coordinates_imported",
+            "channels_added",
+            "channels_updated",
+            "recommendations_merged",
+            "conflicts_resolved",
+            "status",
+            "error_log",
+        }
+        record = {key: payload[key] for key in allowed if payload.get(key) is not None}
+        if not record:
+            return
+
+        columns = ", ".join(record.keys())
+        placeholders = ", ".join("?" for _ in record)
+        values = list(record.values())
+
+        sql = f"INSERT INTO import_history ({columns}) VALUES ({placeholders})"
+        with self.connect():
+            self.connect().execute(sql, values)
+
+    def get_import_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        cursor = self.connect().execute(
+            """
+            SELECT * FROM import_history
+            ORDER BY import_date DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
     def vacuum_database(self) -> bool:
         try:
