@@ -21,6 +21,7 @@ from pandas.errors import ParserError
 from src.channel_scraper import channel_scraper
 from src.database import CoordinatesDatabase
 from src.db_migration import detect_and_migrate_all_results, migrate_existing_csv_to_database
+from src.db_sync import DatabaseExporter, ImportStats, perform_database_sync
 from src.json_processor import process_telegram_json, save_dataframe_to_csv
 from src.config import Config
 from src.recommendations import RecommendationManager
@@ -1860,6 +1861,122 @@ def handle_database_statistics(database: Optional[CoordinatesDatabase]) -> None:
             print(f" - {summary}")
 
 
+def _print_import_stats(stats: ImportStats) -> None:
+    print(f"  Messages to import: {stats.messages_imported}")
+    print(f"  Messages to update: {stats.messages_updated}")
+    print(f"  Messages to skip: {stats.messages_skipped}")
+    print(f"  Coordinates to import: {stats.coordinates_imported}")
+    print(f"  Channels to add: {stats.channels_added}")
+    print(f"  Channels to update: {stats.channels_updated}")
+    print(f"  Recommendations merged: {stats.recommendations_merged}")
+
+
+def handle_database_json_export(database: CoordinatesDatabase) -> None:
+    exporter = DatabaseExporter(database)
+    output_path = (
+        input("Enter export path [results/database_export.json]: ").strip()
+        or "results/database_export.json"
+    )
+    compress_choice = input("Compress export with gzip? (Y/n): ").strip().lower()
+    compress = compress_choice not in {"n", "no"}
+
+    incremental_input = (
+        input("Export records updated since ISO timestamp (leave blank for full export): ")
+        .strip()
+    )
+    incremental_since: Optional[datetime.datetime] = None
+    if incremental_input:
+        try:
+            incremental_since = datetime.datetime.fromisoformat(incremental_input)
+        except ValueError:
+            print("Invalid timestamp; exporting full database instead.")
+
+    summary = exporter.export_to_json(
+        output_path,
+        compress=compress,
+        incremental_since=incremental_since,
+    )
+
+    print("\n✅ Export complete!")
+    print(f"Saved to: {summary['path']}")
+    print(f"Channels included: {summary['channel_count']}")
+    print(f"Messages included: {summary['message_count']}")
+    size_kb = summary['size'] / 1024 if summary['size'] else 0
+    print(f"Approximate size: {size_kb:.1f} KiB")
+
+
+def handle_database_json_import(database: CoordinatesDatabase) -> None:
+    import_path = input("Enter path to JSON or SQLite export: ").strip()
+    file_path = Path(import_path)
+    if not file_path.exists():
+        print("File not found. Please verify the path and try again.")
+        return
+
+    print("\nImport strategy options:")
+    print("  1. Conservative (keep existing records)")
+    print("  2. Aggressive (overwrite with imported data)")
+    print("  3. Smart (compare timestamps)")
+
+    strategy_choice = prompt_validated(
+        "Select strategy (1-3): ",
+        lambda value: value in {"1", "2", "3"},
+        error_msg="Please choose 1, 2, or 3.",
+    )
+    strategies = ["conservative", "aggressive", "smart"]
+    strategy = strategies[int(strategy_choice) - 1]
+
+    try:
+        dry_run_result = perform_database_sync(
+            database,
+            str(file_path),
+            strategy=strategy,
+            dry_run=True,
+        )
+    except (ValueError, OSError, json.JSONDecodeError, sqlite3.DatabaseError) as exc:
+        LOGGER.error("Dry-run import failed: %s", exc)
+        print(f"\n❌ Dry run failed: {exc}")
+        return
+
+    stats: ImportStats = dry_run_result["stats"]
+    print("\nDry-run summary:")
+    _print_import_stats(stats)
+
+    confirm = input("\nProceed with import? (y/N): ").strip().lower()
+    if confirm != "y":
+        print("Import cancelled.")
+        return
+
+    try:
+        result = perform_database_sync(
+            database,
+            str(file_path),
+            strategy=strategy,
+            dry_run=False,
+        )
+    except (ValueError, OSError, json.JSONDecodeError, sqlite3.DatabaseError) as exc:
+        LOGGER.error("Import failed: %s", exc)
+        print(f"\n❌ Import failed: {exc}")
+        return
+
+    final_stats: ImportStats = result["stats"]
+    print("\n✅ Import completed successfully!")
+    _print_import_stats(final_stats)
+
+
+def handle_import_history(database: CoordinatesDatabase) -> None:
+    history = database.get_import_history(limit=10)
+    if not history:
+        print("\nNo import history recorded yet.")
+        return
+
+    print("\nRecent import events:")
+    for entry in history:
+        timestamp = entry.get("import_date")
+        source = entry.get("source_file") or "Unknown source"
+        status = entry.get("status", "unknown")
+        messages = entry.get("messages_imported", 0) + entry.get("messages_updated", 0)
+        print(f" - {timestamp}: {source} ({status}, messages processed: {messages})")
+
 def handle_database_management(database: Optional[CoordinatesDatabase]) -> None:
     if not database:
         print("Database support is disabled.")
@@ -1874,14 +1991,17 @@ def handle_database_management(database: Optional[CoordinatesDatabase]) -> None:
 5. Reset database
 6. Import CSV files from results/
 7. View database statistics
-8. Return
+8. Export database snapshot (JSON)
+9. Import database snapshot (JSON)
+10. View import history
+11. Return
 Enter choice: """
 
     while True:
         choice = prompt_validated(
             menu,
-            lambda value: value in {str(i) for i in range(1, 9)},
-            error_msg="Please select an option between 1 and 8.",
+            lambda value: value in {str(i) for i in range(1, 12)},
+            error_msg="Please select an option between 1 and 11.",
         )
         if choice == "1":
             path = input("Enter CSV export path: ").strip() or "results/database_export.csv"
@@ -1926,6 +2046,12 @@ Enter choice: """
         elif choice == "7":
             handle_database_statistics(database)
         elif choice == "8":
+            handle_database_json_export(database)
+        elif choice == "9":
+            handle_database_json_import(database)
+        elif choice == "10":
+            handle_import_history(database)
+        elif choice == "11":
             break
         else:
             print("Invalid choice. Please try again.")
