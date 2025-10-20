@@ -270,6 +270,7 @@ whichever folder you configure. CSV columns include:
 | `message_content` | Text snippet that contained the coordinates. |
 | `message_media_type` | Media classification derived from the Telegram message. |
 | `message_published_at` | Timestamp of the message. |
+| `date` | Date (UTC) extracted from the post timestamp. |
 | `message_source` | Channel/group username or ID. |
 | `latitude`, `longitude` | Extracted coordinates in decimal degrees. |
 
