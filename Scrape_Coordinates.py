@@ -18,6 +18,7 @@ from dotenv import load_dotenv, set_key
 from colorama import Fore, Style, init as colorama_init
 from pandas.errors import ParserError
 
+from src.channel_list_import import load_channel_list_from_file
 from src.channel_scraper import channel_scraper
 from src.database import CoordinatesDatabase
 from src.db_migration import detect_and_migrate_all_results, migrate_existing_csv_to_database
@@ -639,28 +640,96 @@ def prompt_channel_selection(
     suggestions, source = _suggest_channels(database, recommendation_manager)
 
     if suggestions and source:
-        print(
-            f"Suggested {source}: {', '.join(suggestions)}"
-        )
+        print(f"Suggested {source}: {', '.join(suggestions)}")
 
-    while True:
+    def _prompt_manual_entry() -> Optional[List[str]]:
         if suggestions:
-            channels_input = prompt_with_smart_default(
+            response = prompt_with_smart_default(
                 prompt,
                 ", ".join(suggestions),
                 validator=lambda value: bool(_parse_channel_list(value)),
             )
         else:
-            channels_input = input(f"{prompt}: ").strip()
-            if not channels_input:
+            response = input(f"{prompt}: ").strip()
+            if not response:
                 print("At least one channel is required.")
-                continue
+                return None
 
-        channels = _parse_channel_list(channels_input)
+        channels = _parse_channel_list(response)
+        if not channels:
+            print("No valid channels selected. Please try again.")
+            return None
+        return channels
+
+    def _prompt_file_import() -> Optional[List[str]]:
+        file_input = input("Enter the path to your channel list file: ").strip()
+        if not file_input:
+            print("File path is required when importing from a list.")
+            return None
+
+        file_path = Path(file_input).expanduser()
+        if not file_path.exists():
+            print(f"File not found: {file_path}")
+            return None
+
+        if file_path.is_dir():
+            print(f"{file_path} is a directory. Please provide a text file.")
+            return None
+
+        try:
+            result = load_channel_list_from_file(file_path)
+        except OSError as exc:
+            print(f"Failed to read {file_path}: {exc}")
+            return None
+
+        if result.encoding_errors:
+            print(
+                "⚠️  Some characters could not be decoded using UTF-8. They were "
+                "replaced while reading the file."
+            )
+
+        if result.invalid_entries:
+            print("⚠️  Issues detected while parsing the file:")
+            for message in result.invalid_entries:
+                print(f"   • {message}")
+
+        if result.duplicate_entries:
+            print("⚠️  Duplicate channels were skipped:")
+            for duplicate in result.duplicate_entries:
+                print(f"   • {duplicate}")
+
+        if not result.channels:
+            print("No valid channels found in the file. Please review the warnings above.")
+            return None
+
+        preview = result.channels[:5]
+        print(f"Imported {len(result.channels)} channel(s) from {file_path}.")
+        print("Preview:")
+        for channel in preview:
+            print(f"   • {channel}")
+        remaining = len(result.channels) - len(preview)
+        if remaining > 0:
+            print(f"   … and {remaining} more.")
+
+        return result.channels
+
+    while True:
+        print("\nHow would you like to provide channels?")
+        print("1. Manual entry")
+        print("2. Import from text file")
+        method = prompt_validated(
+            "Enter choice (1-2): ",
+            lambda value: value in {"1", "2"},
+            error_msg="Please choose 1 or 2.",
+        )
+
+        if method == "1":
+            channels = _prompt_manual_entry()
+        else:
+            channels = _prompt_file_import()
+
         if channels:
             return channels
-
-        print("No valid channels selected. Please try again.")
 
 
 def prompt_date_limit() -> Optional[str]:

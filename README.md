@@ -167,9 +167,10 @@ Refer to `example_credentials.env` for the complete list of supported keys.
 
 2. Follow the on-screen prompts:
 
-   - **Quick Scrape** – enter one or more channel usernames/IDs and start
-     immediately. A CSV (and optional database/KML/KMZ export) is created once the
-     scrape finishes.
+   - **Quick Scrape** – enter one or more channel usernames/IDs manually or
+     switch to the new *Import from file* option to load a prepared text file. A
+     CSV (and optional database/KML/KMZ export) is created once the scrape
+     finishes.
    - **Advanced Options** – access the global chat search, JSON import tools,
      database utilities, recommendation manager, and visualisation menu.
    - **View Results & Statistics** – inspect database totals, recently created
@@ -203,6 +204,27 @@ Advanced Options → Manage recommended channels provides tooling to:
 - Harvest Telegram's "similar channel" recommendations manually or
   automatically when `TELEGRAM_RECS_AUTO_HARVEST=true`.
 - Recalculate stored scores after adjusting weights or heuristics.
+
+#### Channel list files
+
+When using the Quick Scrape importer you can maintain a reusable text file of
+channels. The parser supports:
+
+- One channel per line (`@username`, numeric IDs, or `https://t.me/...` URLs)
+- Optional comments starting with `#`
+- Empty lines anywhere in the document
+
+Invalid entries are skipped with line-specific warnings and duplicate channels
+are automatically removed. A short preview confirms the first few channels
+loaded from the file. Example:
+
+```text
+# Channels to monitor
+@example_channel
+t.me/AnotherChannel
+-1001234567890
+https://t.me/geo_updates
+```
 
 ### Programmatic scraping
 
