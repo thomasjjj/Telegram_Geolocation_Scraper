@@ -127,7 +127,11 @@ def migrate_existing_csv_to_database(csv_path: str, database: CoordinatesDatabas
             LOGGER.debug("Skipping row with missing message id")
             continue
 
-        message_date = row.get("message_published_at") or row.get("message_date")
+        message_date = (
+            row.get("message_published_at")
+            or row.get("message_date")
+            or row.get("date")
+        )
         message_text = row.get("message_content") or row.get("message_text")
         media_type = row.get("message_media_type") or row.get("media_type")
 
