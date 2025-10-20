@@ -25,6 +25,19 @@ from src.db_migration import detect_and_migrate_all_results, migrate_existing_cs
 from src.db_sync import DatabaseExporter, ImportStats, perform_database_sync
 from src.json_processor import process_telegram_json, save_dataframe_to_csv
 from src.config import Config
+from src.menu_system import (
+    ConfirmationPrompt,
+    MenuStyle,
+    NavigationContext,
+)
+from src.menus import (
+    AdvancedToolsMenu,
+    DatabaseMenu,
+    MainMenu,
+    RecommendationMaintenanceMenu,
+    RecommendationsMenu,
+    SettingsMenu,
+)
 from src.recommendations import RecommendationManager
 from src.validators import (
     prompt_validated,
@@ -97,35 +110,510 @@ def _validate_percentage(value: str) -> bool:
         return False
 
 
-MAIN_MENU = """
-=== Telegram Coordinates Scraper ===
+def _pause_for_user(message: str = "Press Enter to continue...") -> None:
+    """Pause execution until the user acknowledges the message."""
 
-1. Quick Scrape (recommended)
-   → Enter channel(s) and start immediately
-   
-2. Advanced Options
-   → Database management, recommendations, JSON import
-   
-3. View Results & Statistics
-
-4. Exit
-
-Enter choice (1-4): """
+    input(f"\n{MenuStyle.GREEN}{message}{MenuStyle.END}")
 
 
-ADVANCED_MENU = """
-=== Advanced Options ===
+def build_main_menu_stats(
+    database: Optional[CoordinatesDatabase],
+    recommendation_manager: Optional[RecommendationManager],
+) -> Dict[str, Any]:
+    """Collect metrics for the main menu badges and overview."""
 
-1. Search all accessible chats
-2. Process a JSON export file
-3. Scan all known channels with coordinates
-4. Update tracked channels with latest messages
-5. Manage database
-6. Manage recommended channels
-7. Visualise coordinates (Kepler.gl)
-8. Back to main menu
+    stats: Dict[str, Any] = {
+        "pending_recommendations": 0,
+        "total_coordinates": 0,
+        "total_messages": 0,
+        "tracked_channels": 0,
+        "last_scrape": "Never",
+    }
 
-Enter choice (1-8): """
+    if database:
+        db_stats = database.get_database_statistics()
+        stats.update(
+            total_coordinates=db_stats.total_coordinates,
+            total_messages=db_stats.total_messages,
+            tracked_channels=db_stats.tracked_channels,
+            last_scrape=db_stats.last_scrape or "Never",
+        )
+
+    if recommendation_manager:
+        rec_stats = recommendation_manager.get_recommendation_statistics()
+        stats["pending_recommendations"] = rec_stats.get("pending", 0)
+        stats["total_recommended"] = rec_stats.get("total_recommended", 0)
+        stats["accepted_recommendations"] = rec_stats.get("accepted", 0)
+        stats["rejected_recommendations"] = rec_stats.get("rejected", 0)
+        stats["inaccessible_recommendations"] = rec_stats.get("inaccessible", 0)
+
+    return stats
+
+
+def get_recommendation_banner(
+    recommendation_manager: Optional[RecommendationManager],
+) -> Optional[Dict[str, Any]]:
+    """Return banner information when pending recommendations exist."""
+
+    if not recommendation_manager:
+        return None
+
+    settings = recommendation_manager.settings
+    if not settings.enabled or not settings.show_at_startup:
+        return None
+
+    stats = recommendation_manager.get_recommendation_statistics()
+    pending = int(stats.get("pending", 0))
+    if pending == 0:
+        return None
+
+    top = recommendation_manager.get_top_recommendations(
+        limit=1,
+        min_hit_rate=settings.min_hit_rate,
+    )
+    top_score = 0.0
+    top_label = ""
+    if top:
+        record = top[0]
+        top_score = float(record.get("recommendation_score") or 0.0)
+        top_label = (
+            record.get("title")
+            or record.get("username")
+            or f"ID:{record.get('channel_id')}"
+        )
+
+    return {
+        "pending": pending,
+        "top_score": top_score,
+        "top_label": top_label,
+    }
+
+
+def _update_env_flag(env_path: Path, key: str, value: bool) -> None:
+    """Persist a boolean configuration flag to the environment file."""
+
+    text = "true" if value else "false"
+    os.environ[key] = text
+    set_key(str(env_path), key, text)
+
+
+def handle_recommendations_menu(
+    context: NavigationContext,
+    recommendation_manager: Optional[RecommendationManager],
+    database: Optional[CoordinatesDatabase],
+    db_config: DbConfig,
+    api_id: int,
+    api_hash: str,
+    session_manager: TelegramSessionManager,
+) -> Optional[str]:
+    """Display the recommendations menu and execute user actions."""
+
+    if not recommendation_manager or not recommendation_manager.settings.enabled:
+        print("Recommendation system is disabled.")
+        _pause_for_user()
+        return None
+
+    context.push("Recommended Channels")
+    try:
+        while True:
+            stats = recommendation_manager.get_recommendation_statistics()
+            menu = RecommendationsMenu(context, stats)
+            choice = menu.show()
+
+            if choice == "help":
+                menu.display_help()
+                continue
+            if choice == "back":
+                return None
+            if choice == "home":
+                context.go_home()
+                return None
+            if choice == "quit":
+                return "quit"
+
+            if choice == "1":
+                view_top_recommendations(recommendation_manager)
+                _pause_for_user()
+            elif choice == "2":
+                view_all_recommendations(recommendation_manager)
+                _pause_for_user()
+            elif choice == "3":
+                scrape_recommended_channels_menu(
+                    recommendation_manager,
+                    database,
+                    db_config,
+                    api_id,
+                    api_hash,
+                    session_manager,
+                )
+                _pause_for_user("Press Enter to return to Recommended Channels...")
+            elif choice == "4":
+                accept_reject_recommendations(recommendation_manager)
+                _pause_for_user()
+            elif choice == "5":
+                harvest_telegram_recommendations_cli(
+                    recommendation_manager,
+                    session_manager,
+                )
+                _pause_for_user()
+            elif choice == "6":
+                export_recommendations_cli(recommendation_manager)
+                _pause_for_user()
+            elif choice == "7":
+                view_forward_analysis(recommendation_manager)
+                _pause_for_user()
+            elif choice == "8":
+                result = handle_recommendation_maintenance_menu(
+                    context,
+                    recommendation_manager,
+                    database,
+                    api_id,
+                    api_hash,
+                    session_manager,
+                )
+                if result == "quit":
+                    return "quit"
+            else:
+                print("Invalid choice. Please select a listed option.")
+                _pause_for_user()
+    finally:
+        context.pop()
+
+    return None
+
+
+def handle_recommendation_maintenance_menu(
+    context: NavigationContext,
+    recommendation_manager: RecommendationManager,
+    database: Optional[CoordinatesDatabase],
+    api_id: int,
+    api_hash: str,
+    session_manager: TelegramSessionManager,
+) -> Optional[str]:
+    """Display the maintenance submenu for recommendations."""
+
+    context.push("Maintenance")
+    try:
+        while True:
+            menu = RecommendationMaintenanceMenu(context)
+            choice = menu.show()
+
+            if choice == "help":
+                menu.display_help()
+                continue
+            if choice == "back":
+                return None
+            if choice == "home":
+                context.go_home()
+                return None
+            if choice == "quit":
+                return "quit"
+
+            if choice == "1":
+                enrich_recommendations_cli(
+                    recommendation_manager,
+                    api_id,
+                    api_hash,
+                    session_manager,
+                )
+            elif choice == "2":
+                cleanup_invalid_recommendations_cli(database)
+            elif choice == "3":
+                recalculate_recommendation_scores_cli(recommendation_manager)
+            else:
+                print("Invalid choice. Please select a listed option.")
+                _pause_for_user()
+                continue
+
+            _pause_for_user()
+    finally:
+        context.pop()
+
+    return None
+
+
+def handle_database_menu(
+    context: NavigationContext,
+    database: Optional[CoordinatesDatabase],
+) -> Optional[str]:
+    """Display the database management menu."""
+
+    if not database:
+        print("Database support is disabled.")
+        _pause_for_user()
+        return None
+
+    context.push("Database & Export")
+    try:
+        while True:
+            summary = build_main_menu_stats(database, None)
+            menu = DatabaseMenu(
+                context,
+                {
+                    "total_messages": summary.get("total_messages", 0),
+                    "total_coordinates": summary.get("total_coordinates", 0),
+                    "tracked_channels": summary.get("tracked_channels", 0),
+                    "last_scrape": summary.get("last_scrape"),
+                },
+            )
+            choice = menu.show()
+
+            if choice == "help":
+                menu.display_help()
+                continue
+            if choice == "back":
+                return None
+            if choice == "home":
+                context.go_home()
+                return None
+            if choice == "quit":
+                return "quit"
+
+            if choice == "1":
+                path = (
+                    input("Enter CSV export path [results/database_export.csv]: ").strip()
+                    or "results/database_export.csv"
+                )
+                df = database.export_to_dataframe()
+                df.to_csv(path, index=False)
+                print(f"Exported {len(df)} rows to {path}")
+                _pause_for_user()
+            elif choice == "2":
+                path = (
+                    input("Enter CSV export path [results/coordinates_summary.csv]: ").strip()
+                    or "results/coordinates_summary.csv"
+                )
+                df = database.export_coordinate_summary()
+                if df.empty:
+                    print("No coordinates available for export.")
+                else:
+                    df.to_csv(path, index=False)
+                    print(f"Exported {len(df)} coordinate rows to {path}")
+                _pause_for_user()
+            elif choice == "3":
+                channel_identifier = prompt_validated(
+                    "Enter channel ID: ",
+                    validate_positive_int,
+                    error_msg="Channel ID must be numeric.",
+                )
+                df = database.export_to_dataframe(int(channel_identifier))
+                if df.empty:
+                    print("No records found for the specified channel.")
+                else:
+                    path = (
+                        input(
+                            "Enter CSV export path "
+                            f"[results/channel_{channel_identifier}.csv]: "
+                        ).strip()
+                        or f"results/channel_{channel_identifier}.csv"
+                    )
+                    df.to_csv(path, index=False)
+                    print(f"Exported {len(df)} rows to {path}")
+                _pause_for_user()
+            elif choice == "4":
+                imported = detect_and_migrate_all_results(database=database)
+                print(f"Imported {imported} coordinate rows from CSV files.")
+                _pause_for_user()
+            elif choice == "5":
+                option = ConfirmationPrompt.select_option(
+                    "Database snapshot options",
+                    [
+                        ("export", "Create JSON snapshot"),
+                        ("import", "Import JSON snapshot"),
+                    ],
+                )
+                if option == "export":
+                    handle_database_json_export(database)
+                    _pause_for_user()
+                elif option == "import":
+                    handle_database_json_import(database)
+                    _pause_for_user()
+                else:
+                    continue
+            elif choice == "6":
+                path = (
+                    input("Enter backup file path [results/telegram_coordinates_backup.db]: ").strip()
+                    or "results/telegram_coordinates_backup.db"
+                )
+                if database.backup_database(path):
+                    print(f"Database backed up to {path}")
+                _pause_for_user()
+            elif choice == "7":
+                if database.vacuum_database():
+                    print("Database vacuum completed.")
+                _pause_for_user()
+            elif choice == "8":
+                current = database.get_database_statistics()
+                confirm = ConfirmationPrompt.confirm(
+                    "Reset database and delete ALL data?",
+                    warning=True,
+                    details=[
+                        f"Messages: {current.total_messages:,}",
+                        f"Coordinates: {current.total_coordinates:,}",
+                        f"Tracked channels: {current.tracked_channels:,}",
+                    ],
+                )
+                if confirm:
+                    db_path = Path(database.db_path)
+                    database.close()
+                    if db_path.exists():
+                        db_path.unlink()
+                    database.connect()
+                    database.initialize_schema()
+                    print("Database has been reset.")
+                else:
+                    print("Reset cancelled.")
+                _pause_for_user()
+            elif choice == "9":
+                handle_import_history(database)
+                _pause_for_user()
+            else:
+                print("Invalid choice. Please select a listed option.")
+                _pause_for_user()
+    finally:
+        context.pop()
+
+    return None
+
+
+def handle_advanced_tools_menu(
+    context: NavigationContext,
+    database: Optional[CoordinatesDatabase],
+    db_config: DbConfig,
+    api_id: int,
+    api_hash: str,
+    recommendation_manager: Optional[RecommendationManager],
+    config: Config,
+    env_path: Path,
+    session_manager: TelegramSessionManager,
+) -> Optional[str]:
+    """Display the advanced tools menu."""
+
+    context.push("Advanced Tools")
+    try:
+        while True:
+            menu = AdvancedToolsMenu(context)
+            choice = menu.show()
+
+            if choice == "help":
+                menu.display_help()
+                continue
+            if choice == "back":
+                return None
+            if choice == "home":
+                context.go_home()
+                return None
+            if choice == "quit":
+                return "quit"
+
+            if choice == "1":
+                handle_search_all_chats(
+                    database,
+                    db_config,
+                    api_id,
+                    api_hash,
+                    recommendation_manager,
+                    config,
+                    env_path,
+                    session_manager,
+                )
+                _pause_for_user()
+            elif choice == "2":
+                handle_process_json(database)
+                _pause_for_user()
+            elif choice == "3":
+                handle_scan_known_channels(
+                    database,
+                    db_config,
+                    api_id,
+                    api_hash,
+                    recommendation_manager,
+                    session_manager,
+                )
+                _pause_for_user()
+            elif choice == "4":
+                handle_update_known_channels(
+                    database,
+                    db_config,
+                    api_id,
+                    api_hash,
+                    recommendation_manager,
+                    session_manager,
+                )
+                _pause_for_user()
+            else:
+                print("Invalid choice. Please select a listed option.")
+                _pause_for_user()
+    finally:
+        context.pop()
+
+    return None
+
+
+def handle_settings_menu(
+    context: NavigationContext,
+    recommendation_manager: Optional[RecommendationManager],
+    env_path: Path,
+) -> Optional[str]:
+    """Display settings toggles to the user."""
+
+    if not recommendation_manager:
+        print("Settings are unavailable without the recommendation system enabled.")
+        _pause_for_user()
+        return None
+
+    context.push("Settings")
+    try:
+        while True:
+            menu = SettingsMenu(
+                context,
+                {
+                    "show_startup_banner": recommendation_manager.settings.show_at_startup,
+                    "auto_harvest": recommendation_manager.settings.telegram_auto_harvest,
+                    "harvest_after": recommendation_manager.settings.telegram_harvest_after_scrape,
+                },
+            )
+            choice = menu.show()
+
+            if choice == "help":
+                menu.display_help()
+                continue
+            if choice == "back":
+                return None
+            if choice == "home":
+                context.go_home()
+                return None
+            if choice == "quit":
+                return "quit"
+
+            if choice == "1":
+                new_value = not recommendation_manager.settings.show_at_startup
+                recommendation_manager.settings.show_at_startup = new_value
+                _update_env_flag(env_path, "RECOMMENDATIONS_SHOW_AT_STARTUP", new_value)
+                state = "enabled" if new_value else "disabled"
+                print(f"Startup recommendations banner {state}.")
+                _pause_for_user()
+            elif choice == "2":
+                new_value = not recommendation_manager.settings.telegram_auto_harvest
+                recommendation_manager.settings.telegram_auto_harvest = new_value
+                _update_env_flag(env_path, "TELEGRAM_RECS_AUTO_HARVEST", new_value)
+                state = "enabled" if new_value else "disabled"
+                print(f"Automatic harvesting after scrapes {state}.")
+                _pause_for_user()
+            elif choice == "3":
+                new_value = not recommendation_manager.settings.telegram_harvest_after_scrape
+                recommendation_manager.settings.telegram_harvest_after_scrape = new_value
+                _update_env_flag(env_path, "TELEGRAM_RECS_HARVEST_AFTER_SCRAPE", new_value)
+                state = "enabled" if new_value else "disabled"
+                print(f"Post-scrape harvesting {state}.")
+                _pause_for_user()
+            else:
+                print("Invalid choice. Please select a listed option.")
+                _pause_for_user()
+    finally:
+        context.pop()
+
+    return None
 
 
 def configure_logging() -> None:
@@ -804,118 +1292,24 @@ def _format_recommendation_line(index: int, recommendation: Dict[str, Any]) -> s
 
 def show_startup_recommendations(
     recommendation_manager: Optional[RecommendationManager],
-    database: Optional[CoordinatesDatabase],
-    db_config: DbConfig,
-    api_id: int,
-    api_hash: str,
 ) -> None:
-    if not recommendation_manager or not recommendation_manager.settings.show_at_startup:
+    """Print a lightweight startup summary for pending recommendations."""
+
+    banner = get_recommendation_banner(recommendation_manager)
+    if not banner:
         return
 
-    stats = recommendation_manager.get_recommendation_statistics()
-    if stats.get("pending", 0) == 0:
-        return
-
-    print("\n" + "=" * 60)
-    print("📢 RECOMMENDED CHANNELS DISCOVERED")
-    print("=" * 60)
+    print()
+    print(f"{MenuStyle.YELLOW}ℹ️  {MenuStyle.BOLD}New recommendations ready to review{MenuStyle.END}")
     print(
-        f"Found {stats['pending']} channel(s) that frequently forward coordinates across "
-        f"{stats['coordinate_forwards']} analysed forwards."
+        f"   Pending channels: {MenuStyle.BOLD}{banner['pending']:,}{MenuStyle.END}"
     )
-    print()
-
-    top_recommendations = recommendation_manager.get_top_recommendations(
-        limit=recommendation_manager.settings.max_display,
-        min_hit_rate=recommendation_manager.settings.min_hit_rate,
-    )
-
-    if not top_recommendations:
-        print("No recommendations met the minimum score threshold.")
-        return
-
-    print("Top recommendations:\n")
-    for idx, recommendation in enumerate(top_recommendations, start=1):
-        print(_format_recommendation_line(idx, recommendation))
-        print()
-
-    print("Options:")
-    print("  S - Scrape all recommended channels now")
-    print("  T - Scrape the top recommendations")
-    print("  V - Open recommendation management menu")
-    print("  F - Filter by minimum hit rate")
-    print("  L - Skip and continue to main menu")
-    print()
-
-    choice = prompt_validated(
-        "Enter choice (S/T/V/F/L): ",
-        lambda value: value.upper() in {"S", "T", "V", "F", "L"},
-        error_msg="Please choose S, T, V, F, or L.",
-        allow_empty=True,
-        empty_value="L",
-    ).upper()
-    if choice == "S":
-        scrape_recommended_channels_menu(
-            recommendation_manager,
-            database,
-            db_config,
-            api_id,
-            api_hash,
-            session_manager,
-            mode="all",
+    if banner.get("top_label"):
+        print(
+            "   Top score: "
+            f"{banner.get('top_score', 0.0):.1f} ({banner['top_label']})"
         )
-    elif choice == "T":
-        scrape_recommended_channels_menu(
-            recommendation_manager,
-            database,
-            db_config,
-            api_id,
-            api_hash,
-            session_manager,
-            mode="top",
-        )
-    elif choice == "V":
-        handle_recommendation_management(
-            recommendation_manager,
-            database,
-            db_config,
-            api_id,
-            api_hash,
-            session_manager,
-        )
-    elif choice == "F":
-        def _valid_percentage(value: str) -> bool:
-            try:
-                number = float(value)
-            except ValueError:
-                return False
-            return 0.0 <= number <= 100.0
-
-        min_hit_rate = float(
-            prompt_validated(
-                "Minimum coordinate hit rate % (e.g., 20 for 20%): ",
-                _valid_percentage,
-                error_msg="Please enter a percentage between 0 and 100",
-            )
-        )
-
-        filtered_recs = recommendation_manager.get_top_recommendations(
-            limit=recommendation_manager.settings.max_display,
-            min_hit_rate=min_hit_rate,
-        )
-
-        if not filtered_recs:
-            print(f"\n❌ No recommendations found with hit rate >= {min_hit_rate}%")
-            print("Try a lower threshold or wait for more data.")
-        else:
-            print(
-                f"\n✅ Found {len(filtered_recs)} channel(s) with hit rate >= {min_hit_rate}%:\n"
-            )
-            for idx, rec in enumerate(filtered_recs, start=1):
-                print(_format_recommendation_line(idx, rec))
-                print()
-    else:
-        print("Continuing to main menu...\n")
+    print("   Open 'Recommended Channels' from the main menu to begin.")
 
 
 def handle_specific_channel(
@@ -1183,8 +1577,14 @@ def _run_recommended_scrape(
     needs_enrichment = [r for r in recommendations if not r.get("username")]
     if needs_enrichment:
         print(f"\n{len(needs_enrichment)} channel(s) need enrichment to fetch usernames.")
-        enrich = input("Enrich them now? (y/N): ").strip().lower()
-        if enrich == "y":
+        enrich = ConfirmationPrompt.confirm(
+            "Enrich channel metadata before scraping?",
+            default=True,
+            details=[
+                "Fetching usernames improves scraping reliability.",
+            ],
+        )
+        if enrich:
             async def enrich_batch(client: TelegramClient) -> None:
                 for rec in needs_enrichment:
                     await recommendation_manager.enrich_recommendation(
@@ -1224,16 +1624,26 @@ def _run_recommended_scrape(
 
         identifiers.append(identifier_payload)
 
-    print(f"Preparing to scrape {len(identifiers)} channel(s).")
-    LOGGER.info("Scraping %d recommended channels", len(identifiers))
-    confirm = input("Continue? (y/N): ").strip().lower()
-    if confirm != "y":
+    channel_count = len(identifiers)
+    print(f"Preparing to scrape {channel_count} channel(s).")
+    LOGGER.info("Scraping %d recommended channels", channel_count)
+    estimate_low = max(1, channel_count)
+    estimate_high = estimate_low * 2
+    confirmed = ConfirmationPrompt.confirm(
+        f"Scrape {channel_count} recommended channel(s)?",
+        default=True,
+        details=[
+            f"Estimated time: {estimate_low}-{estimate_high} minutes",
+            "This will append new coordinates to the database.",
+        ],
+    )
+    if not confirmed:
         print("Cancelled.")
         LOGGER.debug("User cancelled recommended channel scrape")
         return
 
     date_limit_value = prompt_validated(
-        "Enter date limit (YYYY-MM-DD, or press Enter for no limit): ",
+        "Date limit (YYYY-MM-DD or Enter for all history) [all]: ",
         validate_date,
         error_msg="Invalid date format. Please use YYYY-MM-DD.",
         allow_empty=True,
@@ -2446,13 +2856,7 @@ def main() -> None:
     database = CoordinatesDatabase(db_config["path"]) if db_config["enabled"] else None
     recommendation_manager = RecommendationManager(database) if database else None
 
-    show_startup_recommendations(
-        recommendation_manager,
-        database,
-        db_config,
-        api_id,
-        api_hash,
-    )
+    show_startup_recommendations(recommendation_manager)
 
     phone_prompt = lambda: input("Enter your Telegram phone number (including country code): ").strip()
     password_prompt = lambda: getpass.getpass("Enter your Telegram 2FA password: ")
@@ -2466,42 +2870,89 @@ def main() -> None:
     )
     session_manager.start()
 
+    context = NavigationContext("Main Menu")
+
     try:
         while True:
-            choice = prompt_validated(
-                MAIN_MENU,
-                lambda value: value in {"1", "2", "3", "4"},
-                error_msg="Please choose an option from 1 to 4.",
-            )
-            if choice == "1":
-                handle_specific_channel(
-                    database,
-                    db_config,
-                    api_id,
-                    api_hash,
-                    recommendation_manager,
-                    config,
-                    env_path,
-                    session_manager,
-                )
-            elif choice == "2":
-                handle_advanced_options(
-                    database,
-                    db_config,
-                    api_id,
-                    api_hash,
-                    recommendation_manager,
-                    config,
-                    env_path,
-                    session_manager,
-                )
-            elif choice == "3":
-                handle_database_statistics(database)
-            elif choice == "4":
+            context.go_home()
+            menu_stats = build_main_menu_stats(database, recommendation_manager)
+            banner = get_recommendation_banner(recommendation_manager)
+            main_menu = MainMenu(context, menu_stats, banner)
+            selection = main_menu.show()
+
+            if selection == "help":
+                main_menu.display_help()
+                continue
+            if selection == "home":
+                context.go_home()
+                continue
+            if selection == "back":
+                continue
+            if selection == "quit" or selection == "0":
                 print("Goodbye!")
                 break
+
+            if selection == "1":
+                context.push("Quick Scrape")
+                try:
+                    handle_specific_channel(
+                        database,
+                        db_config,
+                        api_id,
+                        api_hash,
+                        recommendation_manager,
+                        config,
+                        env_path,
+                        session_manager,
+                    )
+                finally:
+                    context.pop()
+            elif selection == "2":
+                result = handle_recommendations_menu(
+                    context,
+                    recommendation_manager,
+                    database,
+                    db_config,
+                    api_id,
+                    api_hash,
+                    session_manager,
+                )
+                if result == "quit":
+                    break
+            elif selection == "3":
+                result = handle_database_menu(context, database)
+                if result == "quit":
+                    break
+            elif selection == "4":
+                handle_database_statistics(database)
+                _pause_for_user()
+            elif selection == "5":
+                context.push("Visualise")
+                try:
+                    handle_kepler_visualization(database)
+                finally:
+                    context.pop()
+            elif selection == "6":
+                result = handle_advanced_tools_menu(
+                    context,
+                    database,
+                    db_config,
+                    api_id,
+                    api_hash,
+                    recommendation_manager,
+                    config,
+                    env_path,
+                    session_manager,
+                )
+                if result == "quit":
+                    break
+            elif selection == "7":
+                result = handle_settings_menu(context, recommendation_manager, env_path)
+                if result == "quit":
+                    break
             else:
                 print("Invalid choice. Please try again.")
+                _pause_for_user()
     finally:
         session_manager.close()
 
