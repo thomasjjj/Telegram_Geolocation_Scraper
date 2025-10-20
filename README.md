@@ -1,4 +1,6 @@
 # Telegram Coordinates Scraper
+<img width="1909" height="1021" alt="image" src="https://github.com/user-attachments/assets/7fff586f-7951-4dee-8fb8-adafed967fea" />
+
 
 ## Overview
 
