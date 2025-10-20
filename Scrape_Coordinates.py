@@ -31,6 +31,7 @@ from src.validators import (
     validate_non_empty,
     validate_positive_int,
 )
+from src.telethon_session import TelegramSessionManager
 
 try:
     from telethon import TelegramClient
@@ -266,7 +267,10 @@ async def ensure_telegram_authentication(api_id: int, api_hash: str, session_nam
 
     client = TelegramClient(session_name, api_id, api_hash)
     try:
-        await client.start(phone=phone_prompt, password=password_prompt)
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.start(phone=phone_prompt, password=password_prompt)
+
         me = await client.get_me()
     except (RPCError, ValueError, OSError) as exc:  # pragma: no cover - Telethon runtime interaction
         LOGGER.error("Authentication failed for session '%s': %s", session_name, exc)
@@ -315,8 +319,8 @@ def setup_wizard(env_path: Path, config: Config) -> tuple[int, str, str]:
 
 
 async def _search_dialogs_for_keywords(
-    api_id: int,
-    api_hash: str,
+    client: TelegramClient,
+    *,
     session_name: str,
     keywords: Iterable[str],
     message_limit: Optional[int] = None,
@@ -476,75 +480,74 @@ async def _search_dialogs_for_keywords(
         return None
 
     try:
-        async with TelegramClient(session_name, api_id, api_hash) as client:
-            all_dialogs: List[Any] = []
-            async for dialog in client.iter_dialogs():
-                if not dialog.is_user:
-                    all_dialogs.append(dialog)
+        all_dialogs: List[Any] = []
+        async for dialog in client.iter_dialogs():
+            if not dialog.is_user:
+                all_dialogs.append(dialog)
 
-            total_dialogs = len(all_dialogs)
-            update_interval = max(5, total_dialogs // 20) if total_dialogs else 5
+        total_dialogs = len(all_dialogs)
+        update_interval = max(5, total_dialogs // 20) if total_dialogs else 5
 
-            print(f"📊 Found {total_dialogs} chats to search")
+        print(f"📊 Found {total_dialogs} chats to search")
 
-            semaphore = asyncio.Semaphore(max(1, concurrent_searches))
+        semaphore = asyncio.Semaphore(max(1, concurrent_searches))
 
-            async def bounded_search(dialog):
-                async with semaphore:
-                    entity = dialog.entity
-                    chat_name = (
-                        dialog.name
-                        or getattr(entity, "username", None)
-                        or f"ID:{getattr(entity, 'id', 'unknown')}"
-                    )
-                    return await search_single_chat(dialog, entity, chat_name)
+        async def bounded_search(dialog):
+            async with semaphore:
+                entity = dialog.entity
+                chat_name = (
+                    dialog.name
+                    or getattr(entity, "username", None)
+                    or f"ID:{getattr(entity, 'id', 'unknown')}"
+                )
+                return await search_single_chat(dialog, entity, chat_name)
 
-            batch_size = 20
-            for start in range(0, total_dialogs, batch_size):
-                batch = all_dialogs[start : start + batch_size]
-                tasks = [bounded_search(dialog) for dialog in batch]
-                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+        batch_size = 20
+        for start in range(0, total_dialogs, batch_size):
+            batch = all_dialogs[start : start + batch_size]
+            tasks = [bounded_search(dialog) for dialog in batch]
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                for result in batch_results:
-                    dialogs_checked += 1
+            for result in batch_results:
+                dialogs_checked += 1
 
-                    if isinstance(result, Exception):
-                        LOGGER.debug("Search task failed: %s", result)
-                        continue
+                if isinstance(result, Exception):
+                    LOGGER.debug("Search task failed: %s", result)
+                    continue
 
-                    if result is SKIP:
-                        dialogs_skipped += 1
-                        continue
+                if result is SKIP:
+                    dialogs_skipped += 1
+                    continue
 
-                    if result is None:
-                        continue
+                if result is None:
+                    continue
 
-                    results.append(result)
-                    chat_name = (
-                        result["dialog"].name
-                        or getattr(result["entity"], "username", None)
-                        or "Unknown"
-                    )
+                results.append(result)
+                chat_name = (
+                    result["dialog"].name
+                    or getattr(result["entity"], "username", None)
+                    or "Unknown"
+                )
 
-                    print(
-                        f"✅ Match #{len(results)}: {chat_name} "
-                        f"(keyword: '{result["keyword"]}', {result.get("match_count", 1)} occurrences)"
-                    )
+                print(
+                    f"✅ Match #{len(results)}: {chat_name} "
+                    f"(keyword: '{result["keyword"]}', {result.get("match_count", 1)} occurrences)"
+                )
 
-                if dialogs_checked % update_interval == 0 or dialogs_checked == total_dialogs:
-                    elapsed = (
-                        datetime.datetime.now(datetime.UTC) - start_time
-                    ).total_seconds()
-                    rate = dialogs_checked / elapsed if elapsed > 0 else 0
-                    percent = (dialogs_checked / total_dialogs * 100) if total_dialogs else 0
-                    print(
-                        f"\r📊 Progress: {dialogs_checked}/{total_dialogs} chats ({percent:.1f}%) | "
-                        f"Matches: {len(results)} | Rate: {rate:.1f} chats/sec",
-                        end="",
-                        flush=True,
-                    )
+            if dialogs_checked % update_interval == 0 or dialogs_checked == total_dialogs:
+                elapsed = (
+                    datetime.datetime.now(datetime.UTC) - start_time
+                ).total_seconds()
+                rate = dialogs_checked / elapsed if elapsed > 0 else 0
+                percent = (dialogs_checked / total_dialogs * 100) if total_dialogs else 0
+                print(
+                    f"\r📊 Progress: {dialogs_checked}/{total_dialogs} chats ({percent:.1f}%) | "
+                    f"Matches: {len(results)} | Rate: {rate:.1f} chats/sec",
+                    end="",
+                    flush=True,
+                )
 
-                await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5)
 
     except KeyboardInterrupt:
         print("\n\n⚠️  Search cancelled by user")
@@ -789,6 +792,7 @@ def show_startup_recommendations(
             db_config,
             api_id,
             api_hash,
+            session_manager,
             mode="all",
         )
     elif choice == "T":
@@ -798,6 +802,7 @@ def show_startup_recommendations(
             db_config,
             api_id,
             api_hash,
+            session_manager,
             mode="top",
         )
     elif choice == "V":
@@ -807,6 +812,7 @@ def show_startup_recommendations(
             db_config,
             api_id,
             api_hash,
+            session_manager,
         )
     elif choice == "F":
         def _valid_percentage(value: str) -> bool:
@@ -851,8 +857,9 @@ def handle_specific_channel(
     recommendation_manager: Optional[RecommendationManager],
     config: Config,
     env_path: Path,
+    session_manager: TelegramSessionManager,
 ) -> None:
-    session_name = prompt_session_name("Enter the session name", config=config, env_path=env_path)
+    session_name = session_manager.session_name
     channels = prompt_channel_selection(database, recommendation_manager)
     date_limit = prompt_date_limit()
 
@@ -863,6 +870,7 @@ def handle_specific_channel(
         api_id=api_id,
         api_hash=api_hash,
         session_name=session_name,
+        session_manager=session_manager,
         use_database=db_config["enabled"] and database is not None,
         skip_existing=db_config.get("skip_existing", True),
         db_path=db_config.get("path"),
@@ -889,8 +897,9 @@ def handle_search_all_chats(
     recommendation_manager: Optional[RecommendationManager],
     config: Config,
     env_path: Path,
+    session_manager: TelegramSessionManager,
 ) -> None:
-    session_name = prompt_session_name("Enter the session name", config=config, env_path=env_path)
+    session_name = session_manager.session_name
     print("\n=== Search Configuration ===")
     print("You can limit the search to recent messages to speed things up.\n")
 
@@ -933,18 +942,15 @@ def handle_search_all_chats(
         message_limit if message_limit is not None else "default",
         days_limit,
     )
-    results = asyncio.run(
-        _search_dialogs_for_keywords(
-            api_id=api_id,
-            api_hash=api_hash,
-            session_name=session_name,
-            keywords=DEFAULT_GEO_KEYWORDS,
-            message_limit=message_limit,
-            days_limit=days_limit,
-            database=database,
-            skip_recently_searched=True,
-            concurrent_searches=5,
-        )
+    results = session_manager.run(
+        _search_dialogs_for_keywords,
+        session_name=session_name,
+        keywords=DEFAULT_GEO_KEYWORDS,
+        message_limit=message_limit,
+        days_limit=days_limit,
+        database=database,
+        skip_recently_searched=True,
+        concurrent_searches=5,
     )
     if not results:
         print("❌ No chats containing geolocation keywords were found.")
@@ -1000,6 +1006,7 @@ def handle_search_all_chats(
         api_id=api_id,
         api_hash=api_hash,
         session_name=session_name,
+        session_manager=session_manager,
         use_database=db_config["enabled"] and database is not None,
         skip_existing=db_config.get("skip_existing", True),
         db_path=db_config.get("path"),
@@ -1024,6 +1031,7 @@ def scrape_recommended_channels_menu(
     db_config: DbConfig,
     api_id: int,
     api_hash: str,
+    session_manager: TelegramSessionManager,
     mode: str = "interactive",
 ) -> None:
     if not recommendation_manager:
@@ -1089,6 +1097,7 @@ def scrape_recommended_channels_menu(
         api_id,
         api_hash,
         recommendations,
+        session_manager,
     )
 
 
@@ -1099,6 +1108,7 @@ def _run_recommended_scrape(
         api_id: int,
         api_hash: str,
         recommendations: List[RecommendationRecord],
+        session_manager: TelegramSessionManager,
 ) -> None:
     # First, try to enrich any channels without usernames
     needs_enrichment = [r for r in recommendations if not r.get("username")]
@@ -1106,13 +1116,15 @@ def _run_recommended_scrape(
         print(f"\n{len(needs_enrichment)} channel(s) need enrichment to fetch usernames.")
         enrich = input("Enrich them now? (y/N): ").strip().lower()
         if enrich == "y":
-            async def enrich_batch():
-                async with TelegramClient("recommended_scrape", api_id, api_hash) as client:
-                    for rec in needs_enrichment:
-                        await recommendation_manager.enrich_recommendation(client, rec["channel_id"])
+            async def enrich_batch(client: TelegramClient) -> None:
+                for rec in needs_enrichment:
+                    await recommendation_manager.enrich_recommendation(
+                        client,
+                        rec["channel_id"],
+                    )
 
             try:
-                asyncio.run(enrich_batch())
+                session_manager.run(enrich_batch)
                 # Reload recommendations to get updated data
                 recommendations = [
                     recommendation_manager.get_recommended_channel(r["channel_id"])
@@ -1166,6 +1178,7 @@ def _run_recommended_scrape(
         api_id=api_id,
         api_hash=api_hash,
         session_name="recommended_scrape",
+        session_manager=session_manager,
         use_database=db_config.get("enabled", True) and database is not None,
         skip_existing=db_config.get("skip_existing", True),
         db_path=db_config.get("path"),
@@ -1195,8 +1208,7 @@ def _run_recommended_scrape(
 
 def harvest_telegram_recommendations_cli(
     recommendation_manager: RecommendationManager,
-    api_id: int,
-    api_hash: str,
+    session_manager: TelegramSessionManager,
 ) -> None:
     """Interactive handler for Telegram's native channel recommendations."""
 
@@ -1276,18 +1288,15 @@ def harvest_telegram_recommendations_cli(
         print("Cancelled.")
         return
 
-    session_name = os.environ.get("TELEGRAM_SESSION_NAME", "recommendation_harvest")
-
-    async def run_harvest() -> Dict[str, Any]:
-        async with TelegramClient(session_name, api_id, api_hash) as client:
-            return await recommendation_manager.harvest_telegram_recommendations(
-                client,
-                min_coordinate_density=min_density,
-                max_source_channels=max_channels,
-            )
+    async def run_harvest(client: TelegramClient) -> Dict[str, Any]:
+        return await recommendation_manager.harvest_telegram_recommendations(
+            client,
+            min_coordinate_density=min_density,
+            max_source_channels=max_channels,
+        )
 
     try:
-        stats = asyncio.run(run_harvest())
+        stats = session_manager.run(run_harvest)
     except (RPCError, ValueError, OSError) as exc:
         LOGGER.error("Failed to harvest Telegram recommendations: %s", exc)
         print(f"\n❌ Harvest failed: {exc}")
@@ -1355,6 +1364,7 @@ def execute_recommendation_action(
     db_config: DbConfig,
     api_id: int,
     api_hash: str,
+    session_manager: TelegramSessionManager,
 ) -> bool:
     """Execute the menu action mapped to *choice*.
 
@@ -1375,16 +1385,21 @@ def execute_recommendation_action(
             db_config,
             api_id,
             api_hash,
+            session_manager,
         ),
         "5": lambda: accept_reject_recommendations(recommendation_manager),
-        "6": lambda: enrich_recommendations_cli(recommendation_manager, api_id, api_hash),
+        "6": lambda: enrich_recommendations_cli(
+            recommendation_manager,
+            api_id,
+            api_hash,
+            session_manager,
+        ),
         "7": lambda: export_recommendations_cli(recommendation_manager),
         "8": lambda: view_forward_analysis(recommendation_manager),
         "9": lambda: cleanup_invalid_recommendations_cli(database),
         "10": lambda: harvest_telegram_recommendations_cli(
             recommendation_manager,
-            api_id,
-            api_hash,
+            session_manager,
         ),
         "11": lambda: recalculate_recommendation_scores_cli(recommendation_manager),
     }
@@ -1404,6 +1419,7 @@ def handle_recommendation_management(
     db_config: DbConfig,
     api_id: int,
     api_hash: str,
+    session_manager: TelegramSessionManager,
 ) -> None:
     if not recommendation_manager or not recommendation_manager.settings.enabled:
         print("Recommendation system is disabled.")
@@ -1420,6 +1436,7 @@ def handle_recommendation_management(
             db_config,
             api_id,
             api_hash,
+            session_manager,
         ):
             break
 
@@ -1540,6 +1557,7 @@ def enrich_recommendations_cli(
     recommendation_manager: RecommendationManager,
     api_id: int,
     api_hash: str,
+    session_manager: TelegramSessionManager,
 ) -> None:
     recommendations = recommendation_manager.list_recommendations(limit=100, order_by="last_seen DESC")
     if not recommendations:
@@ -1550,24 +1568,21 @@ def enrich_recommendations_cli(
     if confirm != "y":
         return
 
-    session_name = os.environ.get("TELEGRAM_SESSION_NAME", "recommendation_enrichment")
-
-    async def enrich_all() -> None:
-        async with TelegramClient(session_name, api_id, api_hash) as client:
-            enriched = failed = 0
-            for recommendation in recommendations:
-                success = await recommendation_manager.enrich_recommendation(
-                    client,
-                    recommendation["channel_id"],
-                )
-                if success:
-                    enriched += 1
-                else:
-                    failed += 1
-            print(f"\nEnrichment complete. Success: {enriched}, Failed: {failed}")
+    async def enrich_all(client: TelegramClient) -> None:
+        enriched = failed = 0
+        for recommendation in recommendations:
+            success = await recommendation_manager.enrich_recommendation(
+                client,
+                recommendation["channel_id"],
+            )
+            if success:
+                enriched += 1
+            else:
+                failed += 1
+        print(f"\nEnrichment complete. Success: {enriched}, Failed: {failed}")
 
     try:
-        asyncio.run(enrich_all())
+        session_manager.run(enrich_all)
     except (RPCError, ValueError, OSError) as exc:  # pragma: no cover - Telethon runtime errors
         LOGGER.error("Failed to enrich recommendations: %s", exc)
 
@@ -1745,6 +1760,7 @@ def handle_scan_known_channels(
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
+    session_manager: TelegramSessionManager,
 ) -> None:
     if not database:
         print("Database support is disabled.")
@@ -1802,13 +1818,16 @@ def handle_scan_known_channels(
     identifiers = [channel.get("username") or channel["id"] for channel in selected]
     LOGGER.info("Scanning %d known channel(s) for coordinates", len(identifiers))
 
+    session_name = session_manager.session_name
+
     channel_scraper(
         channel_links=identifiers,
         date_limit=None,
         output_path=None,
         api_id=api_id,
         api_hash=api_hash,
-        session_name="database_scan",
+        session_name=session_name,
+        session_manager=session_manager,
         use_database=True,
         skip_existing=db_config.get("skip_existing", True),
         db_path=db_config.get("path"),
@@ -1835,6 +1854,7 @@ def handle_update_known_channels(
     api_id: int,
     api_hash: str,
     recommendation_manager: Optional[RecommendationManager],
+    session_manager: TelegramSessionManager,
 ) -> None:
     """Fetch only the latest messages for all channels with coordinates."""
 
@@ -1850,13 +1870,16 @@ def handle_update_known_channels(
     identifiers = [channel.get("username") or channel["id"] for channel in channels]
     print(f"Updating {len(identifiers)} tracked channel(s) with new messages...")
 
+    session_name = session_manager.session_name
+
     channel_scraper(
         channel_links=identifiers,
         date_limit=None,
         output_path=None,
         api_id=api_id,
         api_hash=api_hash,
-        session_name="database_update",
+        session_name=session_name,
+        session_manager=session_manager,
         use_database=True,
         skip_existing=True,
         db_path=db_config.get("path"),
@@ -2259,6 +2282,7 @@ def handle_advanced_options(
     recommendation_manager: Optional[RecommendationManager],
     config: Config,
     env_path: Path,
+    session_manager: TelegramSessionManager,
 ) -> None:
     while True:
         choice = prompt_validated(
@@ -2275,13 +2299,28 @@ def handle_advanced_options(
                 recommendation_manager,
                 config,
                 env_path,
+                session_manager,
             )
         elif choice == "2":
             handle_process_json(database)
         elif choice == "3":
-            handle_scan_known_channels(database, db_config, api_id, api_hash, recommendation_manager)
+            handle_scan_known_channels(
+                database,
+                db_config,
+                api_id,
+                api_hash,
+                recommendation_manager,
+                session_manager,
+            )
         elif choice == "4":
-            handle_update_known_channels(database, db_config, api_id, api_hash, recommendation_manager)
+            handle_update_known_channels(
+                database,
+                db_config,
+                api_id,
+                api_hash,
+                recommendation_manager,
+                session_manager,
+            )
         elif choice == "5":
             handle_database_management(database)
         elif choice == "6":
@@ -2291,6 +2330,7 @@ def handle_advanced_options(
                 db_config,
                 api_id,
                 api_hash,
+                session_manager,
             )
         elif choice == "7":
             handle_kepler_visualization(database)
@@ -2331,39 +2371,56 @@ def main() -> None:
         api_hash,
     )
 
-    while True:
-        choice = prompt_validated(
-            MAIN_MENU,
-            lambda value: value in {"1", "2", "3", "4"},
-            error_msg="Please choose an option from 1 to 4.",
-        )
-        if choice == "1":
-            handle_specific_channel(
-                database,
-                db_config,
-                api_id,
-                api_hash,
-                recommendation_manager,
-                config,
-                env_path,
+    phone_prompt = lambda: input("Enter your Telegram phone number (including country code): ").strip()
+    password_prompt = lambda: getpass.getpass("Enter your Telegram 2FA password: ")
+
+    session_manager = TelegramSessionManager(
+        session_name=session_name,
+        api_id=api_id,
+        api_hash=api_hash,
+        phone_prompt=phone_prompt,
+        password_prompt=password_prompt,
+    )
+    session_manager.start()
+
+    try:
+        while True:
+            choice = prompt_validated(
+                MAIN_MENU,
+                lambda value: value in {"1", "2", "3", "4"},
+                error_msg="Please choose an option from 1 to 4.",
             )
-        elif choice == "2":
-            handle_advanced_options(
-                database,
-                db_config,
-                api_id,
-                api_hash,
-                recommendation_manager,
-                config,
-                env_path,
-            )
-        elif choice == "3":
-            handle_database_statistics(database)
-        elif choice == "4":
-            print("Goodbye!")
-            break
-        else:
-            print("Invalid selection. Please choose an option from 1 to 4.")
+            if choice == "1":
+                handle_specific_channel(
+                    database,
+                    db_config,
+                    api_id,
+                    api_hash,
+                    recommendation_manager,
+                    config,
+                    env_path,
+                    session_manager,
+                )
+            elif choice == "2":
+                handle_advanced_options(
+                    database,
+                    db_config,
+                    api_id,
+                    api_hash,
+                    recommendation_manager,
+                    config,
+                    env_path,
+                    session_manager,
+                )
+            elif choice == "3":
+                handle_database_statistics(database)
+            elif choice == "4":
+                print("Goodbye!")
+                break
+            else:
+                print("Invalid choice. Please try again.")
+    finally:
+        session_manager.close()
 
 
 if __name__ == "__main__":  # pragma: no cover - interactive entry point

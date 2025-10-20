@@ -34,7 +34,7 @@ from src.database import CoordinatesDatabase
 from src.export import save_dataframe_to_kml, save_dataframe_to_kmz
 from src.entity_cache import EntityCache
 from src.rate_limiter import AdaptiveRateLimiter
-from src.telethon_session import ensure_connected
+from src.telethon_session import ensure_connected, TelegramSessionManager
 from src.url_analysis import extract_links, serialize_links
 
 if TYPE_CHECKING:  # pragma: no cover - optional dependency for type checking
@@ -539,6 +539,7 @@ def channel_scraper(
     api_id: Optional[int] = None,
     api_hash: Optional[str] = None,
     session_name: str = "simple_scraper",
+    session_manager: Optional[TelegramSessionManager] = None,
     kml_output_path: Optional[str] = None,
     kmz_output_path: Optional[str] = None,
     use_database: bool = True,
@@ -614,16 +615,22 @@ def channel_scraper(
         settings = recommendation_manager.settings
         LOGGER.info("Auto-harvesting Telegram recommendations %s scrape...", stage)
 
-        async def _harvest_runner() -> Dict[str, Any]:
-            async with TelegramClient(session_name, api_id, api_hash) as client:
-                return await recommendation_manager.harvest_telegram_recommendations(
-                    client,
-                    min_coordinate_density=settings.telegram_min_source_density,
-                    max_source_channels=settings.telegram_max_source_channels,
-                )
+        async def _harvest_runner(client: TelegramClient) -> Dict[str, Any]:
+            return await recommendation_manager.harvest_telegram_recommendations(
+                client,
+                min_coordinate_density=settings.telegram_min_source_density,
+                max_source_channels=settings.telegram_max_source_channels,
+            )
 
         try:
-            stats = asyncio.run(_harvest_runner())
+            if session_manager:
+                stats = session_manager.run(_harvest_runner)
+            else:
+                async def _runner() -> Dict[str, Any]:
+                    async with TelegramClient(session_name, api_id, api_hash) as client:
+                        return await _harvest_runner(client)
+
+                stats = asyncio.run(_runner())
             LOGGER.info(
                 "Telegram recommendation harvest (%s) complete: %s new, %s updated",
                 stage,
@@ -640,79 +647,85 @@ def channel_scraper(
     if harvest_enabled and not harvest_after_scrape:
         _run_auto_harvest("before")
 
-    async def runner() -> None:
-        async with TelegramClient(session_name, api_id, api_hash) as client:
-            LOGGER.info("Connected to Telegram. Scraping %s channels...", len(channel_list))
-            session_id: Optional[int] = None
-            if database_instance:
-                session_type = "single_channel" if len(channel_list) == 1 else "multi_channel"
-                session_id = database_instance.start_session(session_type)
-            total_skipped = total_new = total_coords = 0
-            limiter = AdaptiveRateLimiter(
-                base_delay=_CONFIG.rate_limit_base_delay,
-                max_delay=_CONFIG.rate_limit_max_delay,
-            )
-            entity_cache = EntityCache(
-                client,
-                database_instance,
-                rate_limiter=limiter,
-                max_age_hours=_CONFIG.entity_cache_max_age_hours,
-            )
-            progress_iterator = channel_list
-            progress_bar = None
-            if len(channel_list) > 1:
-                try:
-                    from tqdm import tqdm
-
-                    progress_bar = tqdm(channel_list, desc="Scraping channels", unit="channel")
-                    progress_iterator = progress_bar
-                except ImportError:
-                    LOGGER.debug("tqdm is not installed; progress bar disabled")
+    async def _scrape_channels(client: TelegramClient) -> None:
+        LOGGER.info("Connected to Telegram. Scraping %s channels...", len(channel_list))
+        session_id: Optional[int] = None
+        if database_instance:
+            session_type = "single_channel" if len(channel_list) == 1 else "multi_channel"
+            session_id = database_instance.start_session(session_type)
+        total_skipped = total_new = total_coords = 0
+        limiter = AdaptiveRateLimiter(
+            base_delay=_CONFIG.rate_limit_base_delay,
+            max_delay=_CONFIG.rate_limit_max_delay,
+        )
+        entity_cache = EntityCache(
+            client,
+            database_instance,
+            rate_limiter=limiter,
+            max_age_hours=_CONFIG.entity_cache_max_age_hours,
+        )
+        progress_iterator = channel_list
+        progress_bar = None
+        if len(channel_list) > 1:
             try:
-                for idx, channel in enumerate(progress_iterator, start=1):
-                    if progress_bar:
-                        progress_bar.set_postfix_str(str(channel))
-                    LOGGER.info("[%s/%s] Scraping channel: %s", idx, len(channel_list), channel)
-                    stats = await scrape_channel(
-                        client,
-                        channel,
-                        parsed_date_limit,
-                        coordinate_pattern,
-                        database=database_instance,
-                        skip_existing=skip_existing,
-                        recommendation_manager=recommendation_manager,
-                        entity_cache=entity_cache,
-                        result_collector=result_collector,
-                    )
+                from tqdm import tqdm
 
-                    LOGGER.info(
-                        "Channel %s processed=%s inserted=%s skipped=%s coordinates=%s",
-                        stats.channel_id,
-                        stats.messages_processed,
-                        stats.messages_inserted,
-                        stats.messages_skipped,
-                        stats.coordinates_found,
-                    )
-                    total_skipped += stats.messages_skipped
-                    total_new += stats.messages_inserted
-                    total_coords += stats.coordinates_found
-
-            finally:
+                progress_bar = tqdm(channel_list, desc="Scraping channels", unit="channel")
+                progress_iterator = progress_bar
+            except ImportError:
+                LOGGER.debug("tqdm is not installed; progress bar disabled")
+        try:
+            for idx, channel in enumerate(progress_iterator, start=1):
                 if progress_bar:
-                    progress_bar.close()
-                if database_instance and session_id:
-                    database_instance.end_session(
-                        session_id,
-                        {
-                            "channels_scraped": len(channel_list),
-                            "new_messages": total_new,
-                            "new_coordinates": total_coords,
-                            "skipped_messages": total_skipped,
-                            "status": "completed",
-                        },
-                    )
+                    progress_bar.set_postfix_str(str(channel))
+                LOGGER.info("[%s/%s] Scraping channel: %s", idx, len(channel_list), channel)
+                stats = await scrape_channel(
+                    client,
+                    channel,
+                    parsed_date_limit,
+                    coordinate_pattern,
+                    database=database_instance,
+                    skip_existing=skip_existing,
+                    recommendation_manager=recommendation_manager,
+                    entity_cache=entity_cache,
+                    result_collector=result_collector,
+                )
 
-    asyncio.run(runner())
+                LOGGER.info(
+                    "Channel %s processed=%s inserted=%s skipped=%s coordinates=%s",
+                    stats.channel_id,
+                    stats.messages_processed,
+                    stats.messages_inserted,
+                    stats.messages_skipped,
+                    stats.coordinates_found,
+                )
+                total_skipped += stats.messages_skipped
+                total_new += stats.messages_inserted
+                total_coords += stats.coordinates_found
+
+        finally:
+            if progress_bar:
+                progress_bar.close()
+            if database_instance and session_id:
+                database_instance.end_session(
+                    session_id,
+                    {
+                        "channels_scraped": len(channel_list),
+                        "new_messages": total_new,
+                        "new_coordinates": total_coords,
+                        "skipped_messages": total_skipped,
+                        "status": "completed",
+                    },
+                )
+
+    if session_manager:
+        session_manager.run(_scrape_channels)
+    else:
+        async def runner() -> None:
+            async with TelegramClient(session_name, api_id, api_hash) as client:
+                await _scrape_channels(client)
+
+        asyncio.run(runner())
 
     df = result_collector.finalize()
 
