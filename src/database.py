@@ -18,6 +18,7 @@ import logging
 import shutil
 import sqlite3
 import struct
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
@@ -76,7 +77,8 @@ class CoordinatesDatabase:
 
     def __init__(self, db_path: str = "telegram_coordinates.db") -> None:
         self.db_path = Path(db_path)
-        self._connection: Optional[sqlite3.Connection] = None
+        self._connections: Dict[int, sqlite3.Connection] = {}
+        self._thread_lock = threading.RLock()
         self.entity_cache_max_age_hours = Config().entity_cache_max_age_hours
         self.connect()
         self.initialize_schema()
@@ -93,15 +95,22 @@ class CoordinatesDatabase:
             The connection instance with row access configured as ``sqlite3.Row``.
         """
 
-        if self._connection is None:
+        thread_id = threading.get_ident()
+
+        with self._thread_lock:
+            connection = self._connections.get(thread_id)
+
+        if connection is None:
             if not self.db_path.parent.exists() and str(self.db_path.parent) not in (".", ""):
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-            connection = sqlite3.connect(self.db_path)
+            connection = sqlite3.connect(self.db_path, check_same_thread=False)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
-            self._connection = connection
-        return self._connection
+            with self._thread_lock:
+                self._connections[thread_id] = connection
+
+        return connection
 
     def initialize_schema(self) -> bool:
         """Create database schema if it does not already exist."""
@@ -597,9 +606,10 @@ class CoordinatesDatabase:
     def close(self) -> None:
         """Close the active SQLite connection."""
 
-        if self._connection is not None:
-            self._connection.close()
-            self._connection = None
+        with self._thread_lock:
+            for connection in self._connections.values():
+                connection.close()
+            self._connections.clear()
 
     # ------------------------------------------------------------------
     # Message operations
