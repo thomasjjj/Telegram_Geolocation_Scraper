@@ -83,3 +83,59 @@ def test_bulk_insert_messages_handles_large_batches(database: CoordinatesDatabas
     id_map = database.bulk_insert_messages(channel_id, payload)
 
     assert set(id_map.keys()) == {idx for idx in range(1, message_count + 1)}
+
+
+def test_export_coordinate_summary(database: CoordinatesDatabase) -> None:
+    public_channel_id = 1001
+    private_channel_id = -1009876543210
+
+    database.add_or_update_channel(
+        public_channel_id,
+        {"username": "publicchannel", "title": "Public Channel"},
+    )
+    database.add_or_update_channel(
+        private_channel_id,
+        {"title": "Private Group"},
+    )
+
+    public_message_id = database.add_message(
+        public_channel_id,
+        44,
+        {"message_text": "First coordinate", "has_coordinates": 1},
+    )
+    private_message_id = database.add_message(
+        private_channel_id,
+        55,
+        {"message_text": "Second coordinate", "has_coordinates": 1},
+    )
+
+    database.bulk_add_coordinates(
+        [
+            (public_message_id, 10.5, 20.25),
+            (private_message_id, -33.9, 151.2),
+        ]
+    )
+
+    export_df = database.export_coordinate_summary()
+
+    assert list(export_df.columns) == [
+        "latitude",
+        "longitude",
+        "post text",
+        "post channel",
+        "post link",
+    ]
+    assert len(export_df) == 2
+
+    public_row = export_df[export_df["post link"].str.contains("publicchannel")]\
+        .iloc[0]
+    assert public_row["post channel"] == "publicchannel"
+    assert public_row["post text"] == "First coordinate"
+    assert public_row["latitude"] == pytest.approx(10.5)
+    assert public_row["longitude"] == pytest.approx(20.25)
+    assert public_row["post link"].endswith("/44")
+
+    private_row = export_df[~export_df["post link"].str.contains("publicchannel")].iloc[0]
+    assert private_row["post channel"] == "Private Group"
+    assert private_row["post link"].startswith("https://t.me/c/")
+    assert private_row["post link"].endswith("/55")

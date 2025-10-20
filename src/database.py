@@ -1771,6 +1771,78 @@ class CoordinatesDatabase:
         df = pd.read_sql_query(sql, connection, params=params)
         return df
 
+    def export_coordinate_summary(self) -> pd.DataFrame:
+        """Return a DataFrame with simplified coordinate export columns."""
+
+        sql = (
+            "SELECT "
+            "c.latitude, c.longitude, m.message_text, m.channel_id, m.message_id, "
+            "ch.username, ch.title "
+            "FROM coordinates c "
+            "JOIN messages m ON m.id = c.message_ref "
+            "LEFT JOIN channels ch ON ch.id = m.channel_id "
+            "WHERE c.latitude IS NOT NULL AND c.longitude IS NOT NULL "
+            "ORDER BY m.message_date, m.channel_id, m.message_id"
+        )
+
+        connection = self.connect()
+        raw_df = pd.read_sql_query(sql, connection)
+
+        columns = ["latitude", "longitude", "post text", "post channel", "post link"]
+        if raw_df.empty:
+            return pd.DataFrame(columns=columns)
+
+        # Normalise identifiers for downstream formatting.
+        raw_df["message_id"] = raw_df["message_id"].astype("Int64")
+        raw_df["channel_id"] = raw_df["channel_id"].astype("Int64")
+
+        username_series = raw_df["username"].fillna("")
+        title_series = raw_df["title"].fillna("")
+        channel_fallback = raw_df["channel_id"].astype(str)
+
+        post_channel = username_series
+        post_channel = post_channel.where(post_channel.str.len() > 0, title_series)
+        post_channel = post_channel.where(post_channel.str.len() > 0, channel_fallback)
+
+        def _build_link(row: pd.Series) -> str:
+            message_id = row.get("message_id")
+            if pd.isna(message_id):
+                return ""
+
+            username = row.get("username") or ""
+            if isinstance(username, str) and username:
+                return f"https://t.me/{username}/{int(message_id)}"
+
+            channel_id = row.get("channel_id")
+            if pd.isna(channel_id):
+                return ""
+
+            try:
+                numeric_id = int(channel_id)
+            except (TypeError, ValueError):
+                return ""
+
+            channel_part = str(abs(numeric_id))
+            if channel_part.startswith("100"):
+                channel_part = channel_part[3:]
+
+            if not channel_part:
+                return ""
+
+            return f"https://t.me/c/{channel_part}/{int(message_id)}"
+
+        summary_df = pd.DataFrame(
+            {
+                "latitude": raw_df["latitude"].astype(float),
+                "longitude": raw_df["longitude"].astype(float),
+                "post text": raw_df["message_text"].fillna("").astype(str),
+                "post channel": post_channel.astype(str),
+                "post link": raw_df.apply(_build_link, axis=1),
+            }
+        )
+
+        return summary_df[columns]
+
     def get_database_statistics(self) -> DatabaseStatistics:
         connection = self.connect()
         total_messages = connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
