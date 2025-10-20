@@ -116,12 +116,13 @@ ADVANCED_MENU = """
 1. Search all accessible chats
 2. Process a JSON export file
 3. Scan all known channels with coordinates
-4. Manage database
-5. Manage recommended channels
-6. Visualise coordinates (Kepler.gl)
-7. Back to main menu
+4. Update tracked channels with latest messages
+5. Manage database
+6. Manage recommended channels
+7. Visualise coordinates (Kepler.gl)
+8. Back to main menu
 
-Enter choice (1-7): """
+Enter choice (1-8): """
 
 
 def configure_logging() -> None:
@@ -1827,6 +1828,54 @@ def handle_scan_known_channels(
     print("Scan complete. Updated data is available in the database.")
 
 
+def handle_update_known_channels(
+    database: Optional[CoordinatesDatabase],
+    db_config: DbConfig,
+    api_id: int,
+    api_hash: str,
+    recommendation_manager: Optional[RecommendationManager],
+) -> None:
+    """Fetch only the latest messages for all channels with coordinates."""
+
+    if not database:
+        print("Database support is disabled.")
+        return
+
+    channels = database.get_channels_with_coordinates()
+    if not channels:
+        print("No channels with stored coordinates matched the criteria.")
+        return
+
+    identifiers = [channel.get("username") or channel["id"] for channel in channels]
+    print(f"Updating {len(identifiers)} tracked channel(s) with new messages...")
+
+    channel_scraper(
+        channel_links=identifiers,
+        date_limit=None,
+        output_path=None,
+        api_id=api_id,
+        api_hash=api_hash,
+        session_name="database_update",
+        use_database=True,
+        skip_existing=True,
+        db_path=db_config.get("path"),
+        database=database,
+        recommendation_manager=recommendation_manager,
+        auto_harvest_recommendations=(
+            recommendation_manager.settings.telegram_auto_harvest
+            if recommendation_manager
+            else False
+        ),
+        harvest_after_scrape=(
+            recommendation_manager.settings.telegram_harvest_after_scrape
+            if recommendation_manager
+            else False
+        ),
+    )
+
+    print("Update complete. Newly fetched messages have been processed.")
+
+
 def handle_database_statistics(database: Optional[CoordinatesDatabase]) -> None:
     if not database:
         print("Database support is disabled.")
@@ -2088,8 +2137,8 @@ def handle_advanced_options(
     while True:
         choice = prompt_validated(
             ADVANCED_MENU,
-            lambda value: value in {str(i) for i in range(1, 8)},
-            error_msg="Please choose an option from 1 to 7.",
+            lambda value: value in {str(i) for i in range(1, 9)},
+            error_msg="Please choose an option from 1 to 8.",
         )
         if choice == "1":
             handle_search_all_chats(
@@ -2106,8 +2155,10 @@ def handle_advanced_options(
         elif choice == "3":
             handle_scan_known_channels(database, db_config, api_id, api_hash, recommendation_manager)
         elif choice == "4":
-            handle_database_management(database)
+            handle_update_known_channels(database, db_config, api_id, api_hash, recommendation_manager)
         elif choice == "5":
+            handle_database_management(database)
+        elif choice == "6":
             handle_recommendation_management(
                 recommendation_manager,
                 database,
@@ -2115,12 +2166,12 @@ def handle_advanced_options(
                 api_id,
                 api_hash,
             )
-        elif choice == "6":
-            handle_kepler_visualization(database)
         elif choice == "7":
+            handle_kepler_visualization(database)
+        elif choice == "8":
             break
         else:
-            print("Invalid selection. Please choose an option from 1 to 7.")
+            print("Invalid selection. Please choose an option from 1 to 8.")
 
 
 def main() -> None:
