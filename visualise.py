@@ -1,6 +1,6 @@
 """
-Kepler.gl Database Visualization Script
-Connects to a database and visualizes coordinate data using Kepler.gl
+Telegram Geolocation Scraper - Kepler.gl Visualization
+Visualizes coordinates from your Telegram scraper database
 
 Requirements:
 pip install keplergl pandas sqlalchemy
@@ -9,135 +9,194 @@ pip install keplergl pandas sqlalchemy
 from keplergl import KeplerGl
 import pandas as pd
 from sqlalchemy import create_engine
+from pathlib import Path
 
 # ============================================================================
-# CONFIGURATION - EDIT THESE VALUES
+# CONFIGURATION
 # ============================================================================
 
-# Database connection string examples:
-# SQLite: 'sqlite:///path/to/database.db'
-# PostgreSQL: 'postgresql://username:password@localhost:5432/dbname'
-# MySQL: 'mysql+pymysql://username:password@localhost:3306/dbname'
-DATABASE_URL = 'sqlite:///coordinates.db'
+# Your database file (adjust if needed)
+DATABASE_FILE = 'telegram_coordinates.db'  # or 'coordinates.db'
 
-# SQL query to fetch coordinate data
-# Your table must have latitude and longitude columns
+# SQL query matching your database schema
 SQL_QUERY = """
-            SELECT id, \
-                   name, \
-                   latitude, \
-                   longitude, \
-                   value, \
-                   category
-            FROM locations \
-            """
-
-# Column names for coordinates (adjust to match your database)
-LATITUDE_COLUMN = 'latitude'
-LONGITUDE_COLUMN = 'longitude'
-
+SELECT 
+    c.id,
+    c.latitude,
+    c.longitude,
+    c.coordinate_format,
+    c.extraction_confidence,
+    c.created_at,
+    m.channel_id,
+    m.message_id,
+    m.message_text,
+    m.message_date,
+    m.media_type
+FROM coordinates c
+JOIN messages m ON m.id = c.message_ref
+ORDER BY m.message_date DESC
+"""
 
 # ============================================================================
 # FUNCTIONS
 # ============================================================================
 
-def load_data_from_database(db_url, query):
+def find_database():
+    """Find the database file in the current directory or project."""
+
+    # Check common locations
+    possible_paths = [
+        DATABASE_FILE,
+        f'../{DATABASE_FILE}',
+        'coordinates.db',
+        '../coordinates.db',
+    ]
+
+    for path in possible_paths:
+        if Path(path).exists():
+            print(f"Found database: {path}")
+            return path
+
+    # Search for any .db file
+    for db_file in Path('.').rglob('*.db'):
+        if db_file.name not in ['__pycache__']:
+            print(f"Found database: {db_file}")
+            return str(db_file)
+
+    return None
+
+def load_data_from_database(db_path):
     """
-    Load data from database using SQLAlchemy
+    Load coordinate data from your Telegram scraper database
 
     Args:
-        db_url: Database connection string
-        query: SQL query to execute
+        db_path: Path to the SQLite database file
 
     Returns:
-        pandas DataFrame with the query results
+        pandas DataFrame with coordinates and message data
     """
-    print(f"Connecting to database: {db_url}")
+    if not Path(db_path).exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
+
+    print(f"\nConnecting to database: {db_path}")
+    db_url = f'sqlite:///{db_path}'
     engine = create_engine(db_url)
 
-    print(f"Executing query...")
-    df = pd.read_sql(query, engine)
+    print("Executing query...")
+    df = pd.read_sql(SQL_QUERY, engine)
 
-    print(f"Loaded {len(df)} records")
+    if df.empty:
+        print("\n⚠️  No coordinates found in database!")
+        print("Make sure you've scraped some Telegram channels with coordinates first.")
+        return None
+
+    print(f"✓ Loaded {len(df)} coordinates")
+
+    # Convert date columns to datetime
+    if 'message_date' in df.columns:
+        df['message_date'] = pd.to_datetime(df['message_date'], errors='coerce')
+    if 'created_at' in df.columns:
+        df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
+
     return df
 
+def get_database_stats(df):
+    """Print statistics about the loaded data."""
 
-def load_data_from_csv(filepath):
-    """
-    Alternative: Load data from CSV file
+    print("\n" + "="*70)
+    print("DATABASE STATISTICS")
+    print("="*70)
 
-    Args:
-        filepath: Path to CSV file
+    print(f"\n📊 Total coordinates: {len(df)}")
 
-    Returns:
-        pandas DataFrame
-    """
-    print(f"Loading data from {filepath}")
-    df = pd.read_csv(filepath)
-    print(f"Loaded {len(df)} records")
-    return df
+    if 'channel_id' in df.columns:
+        unique_channels = df['channel_id'].nunique()
+        print(f"📱 Unique channels: {unique_channels}")
+        print(f"\nTop 5 channels by coordinate count:")
+        top_channels = df['channel_id'].value_counts().head(5)
+        for channel_id, count in top_channels.items():
+            print(f"   Channel {channel_id}: {count} coordinates")
 
+    if 'coordinate_format' in df.columns:
+        print(f"\n🗺️  Coordinate formats:")
+        formats = df['coordinate_format'].value_counts()
+        for fmt, count in formats.items():
+            print(f"   {fmt}: {count}")
 
-def create_sample_data():
-    """
-    Create sample coordinate data for testing
+    if 'extraction_confidence' in df.columns:
+        print(f"\n✓ Extraction confidence:")
+        confidence = df['extraction_confidence'].value_counts()
+        for conf, count in confidence.items():
+            print(f"   {conf}: {count}")
 
-    Returns:
-        pandas DataFrame with sample data
-    """
-    import random
+    if 'media_type' in df.columns and not df['media_type'].isna().all():
+        print(f"\n📸 Media types:")
+        media = df['media_type'].value_counts().head(5)
+        for media_type, count in media.items():
+            print(f"   {media_type}: {count}")
 
-    print("Generating sample data...")
-    data = {
-        'id': range(1, 101),
-        'name': [f'Location {i}' for i in range(1, 101)],
-        'latitude': [51.5074 + (random.random() - 0.5) * 0.5 for _ in range(100)],
-        'longitude': [-0.1278 + (random.random() - 0.5) * 0.5 for _ in range(100)],
-        'value': [random.uniform(0, 100) for _ in range(100)],
-        'category': [random.choice(['A', 'B', 'C']) for _ in range(100)]
+    if 'message_date' in df.columns:
+        df_with_dates = df.dropna(subset=['message_date'])
+        if not df_with_dates.empty:
+            earliest = df_with_dates['message_date'].min()
+            latest = df_with_dates['message_date'].max()
+            print(f"\n📅 Date range:")
+            print(f"   Earliest: {earliest}")
+            print(f"   Latest: {latest}")
+
+    print(f"\n🌍 Geographic range:")
+    print(f"   Latitude: {df['latitude'].min():.4f} to {df['latitude'].max():.4f}")
+    print(f"   Longitude: {df['longitude'].min():.4f} to {df['longitude'].max():.4f}")
+
+    print("="*70)
+
+def create_kepler_config():
+    """Create a custom Kepler.gl configuration with better defaults."""
+
+    config = {
+        'version': 'v1',
+        'config': {
+            'mapState': {
+                'bearing': 0,
+                'dragRotate': False,
+                'latitude': 0,
+                'longitude': 0,
+                'pitch': 0,
+                'zoom': 2,
+            },
+            'mapStyle': {
+                'styleType': 'dark'
+            }
+        }
     }
 
-    df = pd.DataFrame(data)
-    print(f"Generated {len(df)} sample records")
-    return df
+    return config
 
-
-def visualize_with_kepler(df, lat_col, lon_col, height=600):
+def visualize_with_kepler(df, height=800):
     """
     Create Kepler.gl visualization
 
     Args:
         df: pandas DataFrame with coordinate data
-        lat_col: Name of latitude column
-        lon_col: Name of longitude column
         height: Height of the map in pixels
 
     Returns:
         KeplerGl map object
     """
-    print("\nCreating Kepler.gl visualization...")
+    print("\n🗺️  Creating Kepler.gl visualization...")
 
-    # Check if required columns exist
-    if lat_col not in df.columns or lon_col not in df.columns:
-        raise ValueError(f"Columns {lat_col} and {lon_col} must exist in the data")
-
-    # Create Kepler map
-    map_1 = KeplerGl(height=height)
+    # Create map with custom config
+    config = create_kepler_config()
+    map_instance = KeplerGl(height=height, config=config)
 
     # Add data to map
-    map_1.add_data(data=df, name='coordinates')
+    map_instance.add_data(data=df, name='telegram_coordinates')
 
-    print("Visualization created successfully!")
-    print("\nDataset info:")
-    print(f"  - Total records: {len(df)}")
-    print(f"  - Columns: {', '.join(df.columns)}")
-    print(f"  - Latitude range: {df[lat_col].min():.4f} to {df[lat_col].max():.4f}")
-    print(f"  - Longitude range: {df[lon_col].min():.4f} to {df[lon_col].max():.4f}")
+    print("✓ Visualization created successfully!")
 
-    return map_1
+    return map_instance
 
-
-def save_map_to_html(map_obj, filename='kepler_map.html'):
+def save_map_to_html(map_obj, filename='telegram_coordinates_map.html'):
     """
     Save the map to an HTML file
 
@@ -145,54 +204,54 @@ def save_map_to_html(map_obj, filename='kepler_map.html'):
         map_obj: KeplerGl map object
         filename: Output filename
     """
-    map_obj.save_to_html(file_name=filename)
-    print(f"\nMap saved to: {filename}")
-    print(f"Open this file in your browser to view the visualization")
-
+    output_path = Path(filename)
+    map_obj.save_to_html(file_name=str(output_path))
+    print(f"\n💾 Map saved to: {output_path.absolute()}")
+    print(f"🌐 Open this file in your browser to view the interactive map")
 
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
 
 if __name__ == "__main__":
-    print("=" * 70)
-    print("Kepler.gl Database Visualization")
-    print("=" * 70)
+    print("="*70)
+    print("TELEGRAM GEOLOCATION SCRAPER - KEPLER.GL VISUALIZER")
+    print("="*70)
 
-    # Choose your data source:
-
-    # Option 1: Load from database
     try:
-        df = load_data_from_database(DATABASE_URL, SQL_QUERY)
+        # Find the database
+        db_path = find_database()
+        if not db_path:
+            print("\n❌ Error: Could not find database file!")
+            print("Please make sure 'telegram_coordinates.db' exists in your project.")
+            exit(1)
+
+        # Load data from database
+        df = load_data_from_database(db_path)
+
+        if df is None or df.empty:
+            print("\n❌ No data to visualize. Please scrape some channels first.")
+            exit(1)
+
+        # Show statistics
+        get_database_stats(df)
+
+        # Show sample data
+        print("\n📋 Sample records:")
+        print(df.head(5).to_string())
+
+        # Create visualization
+        kepler_map = visualize_with_kepler(df, height=800)
+
+        # Save to HTML file
+        save_map_to_html(kepler_map, 'telegram_coordinates_map.html')
+
+        print("\n" + "="*70)
+        print("✓ DONE! Open 'telegram_coordinates_map.html' in your browser.")
+        print("="*70)
+
     except Exception as e:
-        print(f"\nError loading from database: {e}")
-        print("Falling back to sample data...\n")
-        df = create_sample_data()
-
-    # Option 2: Load from CSV (uncomment to use)
-    # df = load_data_from_csv('coordinates.csv')
-
-    # Option 3: Use sample data (uncomment to use)
-    # df = create_sample_data()
-
-    # Display first few rows
-    print("\nFirst 5 records:")
-    print(df.head())
-
-    # Create visualization
-    kepler_map = visualize_with_kepler(
-        df,
-        lat_col=LATITUDE_COLUMN,
-        lon_col=LONGITUDE_COLUMN,
-        height=800
-    )
-
-    # Display in Jupyter notebook (if running in notebook)
-    # kepler_map
-
-    # Save to HTML file (to view in browser)
-    save_map_to_html(kepler_map, 'coordinates_map.html')
-
-    print("\n" + "=" * 70)
-    print("Done! Open 'coordinates_map.html' in your browser to see the map.")
-    print("=" * 70)
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
