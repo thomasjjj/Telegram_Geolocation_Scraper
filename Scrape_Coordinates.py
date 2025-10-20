@@ -2127,22 +2127,23 @@ def handle_database_management(database: Optional[CoordinatesDatabase]) -> None:
 === Database Management ===
 1. Export all data to CSV
 2. Export data for a specific channel
-3. Backup database
-4. Vacuum database
-5. Reset database
-6. Import CSV files from results/
-7. View database statistics
-8. Export database snapshot (JSON)
-9. Import database snapshot (JSON)
-10. View import history
-11. Return
+3. Export coordinates summary (lat/lon/text/channel/link)
+4. Backup database
+5. Vacuum database
+6. Reset database
+7. Import CSV files from results/
+8. View database statistics
+9. Export database snapshot (JSON)
+10. Import database snapshot (JSON)
+11. View import history
+12. Return
 Enter choice: """
 
     while True:
         choice = prompt_validated(
             menu,
-            lambda value: value in {str(i) for i in range(1, 12)},
-            error_msg="Please select an option between 1 and 11.",
+            lambda value: value in {str(i) for i in range(1, 13)},
+            error_msg="Please select an option between 1 and 12.",
         )
         if choice == "1":
             path = input("Enter CSV export path: ").strip() or "results/database_export.csv"
@@ -2163,13 +2164,26 @@ Enter choice: """
             df.to_csv(path, index=False)
             print(f"Exported {len(df)} rows to {path}")
         elif choice == "3":
+            path = (
+                input(
+                    "Enter CSV export path [results/coordinates_summary.csv]: "
+                ).strip()
+                or "results/coordinates_summary.csv"
+            )
+            df = database.export_coordinate_summary()
+            if df.empty:
+                print("No coordinates available for export.")
+                continue
+            df.to_csv(path, index=False)
+            print(f"Exported {len(df)} coordinate rows to {path}")
+        elif choice == "4":
             path = input("Enter backup file path: ").strip() or "results/telegram_coordinates_backup.db"
             if database.backup_database(path):
                 print(f"Database backed up to {path}")
-        elif choice == "4":
+        elif choice == "5":
             if database.vacuum_database():
                 print("Database vacuum completed.")
-        elif choice == "5":
+        elif choice == "6":
             confirm = input("This will delete ALL data. Type 'RESET' to confirm: ").strip()
             if confirm == "RESET":
                 db_path = Path(database.db_path)
@@ -2181,18 +2195,18 @@ Enter choice: """
                 print("Database has been reset.")
             else:
                 print("Reset cancelled.")
-        elif choice == "6":
+        elif choice == "7":
             imported = detect_and_migrate_all_results(database=database)
             print(f"Imported {imported} coordinate rows from CSV files.")
-        elif choice == "7":
-            handle_database_statistics(database)
         elif choice == "8":
-            handle_database_json_export(database)
+            handle_database_statistics(database)
         elif choice == "9":
-            handle_database_json_import(database)
+            handle_database_json_export(database)
         elif choice == "10":
-            handle_import_history(database)
+            handle_database_json_import(database)
         elif choice == "11":
+            handle_import_history(database)
+        elif choice == "12":
             break
         else:
             print("Invalid choice. Please try again.")
