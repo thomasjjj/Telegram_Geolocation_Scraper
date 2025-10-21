@@ -29,7 +29,7 @@ from telethon.errors import RPCError
 from telethon.tl.types import Channel, Chat, MessageMediaDocument, MessageMediaPhoto
 
 from src.config import Config
-from src.coordinates import extract_coordinates
+from src.coordinates import extract_all_coordinates
 from src.database import CoordinatesDatabase
 from src.export import save_dataframe_to_kml, save_dataframe_to_kmz
 from src.entity_cache import EntityCache
@@ -228,11 +228,11 @@ async def _process_message_batch(
 
         message_text = str(message.message)
 
-        matches = coordinate_pattern.findall(message_text)
+        matches = list(coordinate_pattern.findall(message_text))
         if not matches:
-            extracted = extract_coordinates(message_text)
+            extracted = extract_all_coordinates(message_text)
             if extracted:
-                matches = [extracted]
+                matches.extend(extracted)
 
         media_type = "text"
         if message.media:
