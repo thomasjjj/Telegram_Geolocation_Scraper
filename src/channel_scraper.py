@@ -29,7 +29,7 @@ from telethon.errors import RPCError
 from telethon.tl.types import Channel, Chat, MessageMediaDocument, MessageMediaPhoto
 
 from src.config import Config
-from src.coordinates import extract_coordinates
+from src.coordinates import extract_all_coordinates
 from src.database import CoordinatesDatabase
 from src.export import save_dataframe_to_kml, save_dataframe_to_kmz
 from src.entity_cache import EntityCache
@@ -228,11 +228,12 @@ async def _process_message_batch(
 
         message_text = str(message.message)
 
-        matches = coordinate_pattern.findall(message_text)
-        if not matches:
-            extracted = extract_coordinates(message_text)
-            if extracted:
-                matches = [extracted]
+        decimal_matches = [tuple(match) for match in coordinate_pattern.findall(message_text)]
+        supplemental_matches = [
+            tuple(match) for match in extract_all_coordinates(message_text)
+        ]
+        combined_matches = decimal_matches + supplemental_matches
+        unique_matches = list(dict.fromkeys(combined_matches))
 
         media_type = "text"
         if message.media:
@@ -243,7 +244,7 @@ async def _process_message_batch(
             else:
                 media_type = "other_media"
 
-        has_coordinates = bool(matches)
+        has_coordinates = bool(unique_matches)
         if has_coordinates:
             messages_with_coords.append(message.id)
 
@@ -268,7 +269,7 @@ async def _process_message_batch(
             else:
                 source = f"t.me/c/{channel_id}/{message.id}"
 
-            for latitude, longitude in matches:
+            for latitude, longitude in unique_matches:
                 lat_val = float(latitude)
                 lon_val = float(longitude)
 
