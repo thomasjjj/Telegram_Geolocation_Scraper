@@ -10,12 +10,41 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 from src.database import CoordinatesDatabase
 
 
 LOGGER = logging.getLogger(__name__)
+
+try:  # pragma: no cover - optional dependency for interactive feedback
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - optional dependency for interactive feedback
+    tqdm = None
+
+
+T = TypeVar("T")
+
+
+def _progress_iterable(
+    iterable: Iterable[T],
+    *,
+    desc: str,
+    unit: str = "items",
+    total: Optional[int] = None,
+) -> Iterable[T]:
+    """Wrap *iterable* with a tqdm progress bar when available."""
+
+    if tqdm is None:
+        return iterable
+
+    if total is None:
+        try:
+            total = len(iterable)  # type: ignore[arg-type]
+        except (TypeError, AttributeError):
+            total = None
+
+    return tqdm(iterable, desc=desc, unit=unit, total=total, leave=False)
 
 
 class MergeStrategy(Enum):
@@ -129,7 +158,11 @@ class DatabaseExporter:
             params.append(incremental_since.isoformat())
         sql += " ORDER BY channel_id, message_id"
         cursor = self.db.connect().execute(sql, params)
-        return [dict(row) for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        return [
+            dict(row)
+            for row in _progress_iterable(rows, desc="Exporting messages", unit="messages")
+        ]
 
     def _export_coordinates(
         self, incremental_since: Optional[datetime] = None
@@ -144,7 +177,11 @@ class DatabaseExporter:
             params.append(incremental_since.isoformat())
         sql += " ORDER BY c.id"
         cursor = self.db.connect().execute(sql, params)
-        return [dict(row) for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        return [
+            dict(row)
+            for row in _progress_iterable(rows, desc="Exporting coordinates", unit="coordinates")
+        ]
 
     def _export_channels_with_progress(self) -> List[Dict[str, Any]]:
         cursor = self.db.connect().execute(
@@ -160,7 +197,11 @@ class DatabaseExporter:
             ORDER BY c.id
             """
         )
-        return [dict(row) for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        return [
+            dict(row)
+            for row in _progress_iterable(rows, desc="Exporting channels", unit="channels")
+        ]
 
     def _export_sessions(
         self, incremental_since: Optional[datetime] = None
@@ -172,13 +213,23 @@ class DatabaseExporter:
             params.append(incremental_since.isoformat())
         sql += " ORDER BY id"
         cursor = self.db.connect().execute(sql, params)
-        return [dict(row) for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        return [
+            dict(row)
+            for row in _progress_iterable(rows, desc="Exporting sessions", unit="sessions")
+        ]
 
     def _export_recommendations(self) -> List[Dict[str, Any]]:
         cursor = self.db.connect().execute(
             "SELECT * FROM recommended_channels ORDER BY recommendation_score DESC"
         )
-        return [dict(row) for row in cursor.fetchall()]
+        rows = cursor.fetchall()
+        return [
+            dict(row)
+            for row in _progress_iterable(
+                rows, desc="Exporting recommendations", unit="recommendations"
+            )
+        ]
 
     def _get_device_id(self) -> str:
         device_id = self.db.get_metadata("device_id")
@@ -336,7 +387,9 @@ class DatabaseImporter:
 
     def _import_channels(self, channels: Iterable[Dict[str, Any]], dry_run: bool) -> None:
         connection = self.db.connect()
-        for channel in channels:
+        for channel in _progress_iterable(
+            channels, desc="Importing channels", unit="channels"
+        ):
             channel_id = channel.get("id")
             if channel_id is None:
                 continue
@@ -395,7 +448,8 @@ class DatabaseImporter:
 
     def _import_messages(self, messages: Iterable[Dict[str, Any]], dry_run: bool) -> None:
         batch_size = 500
-        for batch in self._batch(messages, batch_size):
+        message_stream = _progress_iterable(messages, desc="Importing messages", unit="messages")
+        for batch in self._batch(message_stream, batch_size):
             existing = self._get_existing_message_map(batch)
             for message in batch:
                 channel_id = message.get("channel_id")
@@ -435,7 +489,9 @@ class DatabaseImporter:
     def _import_coordinates(
         self, coordinates: Iterable[Dict[str, Any]], dry_run: bool
     ) -> None:
-        for coord in coordinates:
+        for coord in _progress_iterable(
+            coordinates, desc="Importing coordinates", unit="coordinates"
+        ):
             channel_id = coord.get("channel_id")
             message_id = coord.get("message_id")
             if channel_id is None or message_id is None:
@@ -476,13 +532,22 @@ class DatabaseImporter:
         self, recommendations: Iterable[Dict[str, Any]], dry_run: bool
     ) -> None:
         recommendations_list = list(recommendations)
+        iterator = _progress_iterable(
+            recommendations_list,
+            desc="Importing recommendations",
+            unit="recommendations",
+        )
         if dry_run:
-            self.stats.recommendations_merged += len(recommendations_list)
+            processed = 0
+            for record in iterator:
+                if record.get("channel_id") is None:
+                    continue
+                processed += 1
+            self.stats.recommendations_merged += processed
             return
 
         connection = self.db.connect()
-        count = 0
-        for record in recommendations_list:
+        for record in iterator:
             channel_id = record.get("channel_id")
             if channel_id is None:
                 continue
@@ -501,15 +566,18 @@ class DatabaseImporter:
                 f"ON CONFLICT(channel_id) DO UPDATE SET {', '.join(assignments)}"
             )
             connection.execute(sql, values)
-            count += 1
-
-        self.stats.recommendations_merged += count
+            self.stats.recommendations_merged += 1
 
     def _import_sessions(self, sessions: Iterable[Dict[str, Any]], dry_run: bool) -> None:
+        session_iterator = _progress_iterable(
+            sessions, desc="Importing sessions", unit="sessions"
+        )
         if dry_run:
+            for _ in session_iterator:
+                pass
             return
         connection = self.db.connect()
-        for session in sessions:
+        for session in session_iterator:
             columns = [key for key in session if key in {
                 "id",
                 "session_start",
@@ -535,7 +603,9 @@ class DatabaseImporter:
     def _update_channel_progress(
         self, channels: Iterable[Dict[str, Any]], dry_run: bool
     ) -> None:
-        for channel in channels:
+        for channel in _progress_iterable(
+            channels, desc="Updating channel progress", unit="channels"
+        ):
             channel_id = channel.get("id")
             latest_imported = channel.get("latest_message_id")
             if channel_id is None or latest_imported is None:
